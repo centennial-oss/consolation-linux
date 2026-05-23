@@ -5,6 +5,8 @@ sync-linux:
 	rsync -az --delete \
 		--exclude .git \
 		--exclude build \
+		--exclude localdata \
+		--exclude reference \
 		--exclude .cache \
 		./ $(LINUX_HOST):$(LINUX_DIR)/
 
