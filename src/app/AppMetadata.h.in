@@ -1,0 +1,18 @@
+#pragma once
+
+#include <QString>
+
+namespace consolation::app {
+
+struct AppMetadata {
+    static constexpr auto name = "@PROJECT_NAME@";
+    static constexpr auto displayName = "Consolation";
+    static constexpr auto appId = "@CONSOLATION_APP_ID@";
+    static constexpr auto version = "@PROJECT_VERSION@";
+    static constexpr auto gitCommit = "@CONSOLATION_GIT_COMMIT@";
+    static constexpr auto buildDate = "@CONSOLATION_BUILD_DATE@";
+    static constexpr auto websiteUrl = "@PROJECT_HOMEPAGE_URL@";
+    static constexpr auto privacyUrl = "https://centennialoss.org/privacy/";
+};
+
+} // namespace consolation::app

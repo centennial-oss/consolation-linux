@@ -3,7 +3,6 @@ LINUX_DIR ?= ~/src/consolation-linux
 
 sync-linux:
 	rsync -az --delete \
-		--exclude .git \
 		--exclude build \
 		--exclude localdata \
 		--exclude reference \
