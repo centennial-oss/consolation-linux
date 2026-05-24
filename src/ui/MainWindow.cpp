@@ -11,6 +11,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -20,9 +21,11 @@
 #include <QPaintEvent>
 #include <QPushButton>
 #include <QSize>
+#include <QSlider>
 #include <QStyle>
 #include <QStringList>
 #include <QTextEdit>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -102,6 +105,38 @@ constexpr auto dialogStyle = R"(
         background-color: rgba(204, 17, 187, 48);
     }
 )";
+constexpr auto playbackButtonStyle = R"(
+    QPushButton {
+        color: white;
+        background-color: rgba(255, 255, 255, 22);
+        border: none;
+        border-radius: 32px;
+        font-size: 30px;
+        font-weight: 500;
+    }
+    QPushButton:hover {
+        background-color: rgba(255, 255, 255, 42);
+    }
+)";
+constexpr auto playbackSliderStyle = R"(
+    QSlider::groove:horizontal {
+        height: 8px;
+        background: rgba(255, 255, 255, 145);
+        border-radius: 4px;
+    }
+    QSlider::sub-page:horizontal {
+        background: #CC11BB;
+        border-radius: 4px;
+    }
+    QSlider::handle:horizontal {
+        background: #CC11BB;
+        border: 8px solid #4a4a4f;
+        width: 22px;
+        height: 22px;
+        margin: -15px 0;
+        border-radius: 19px;
+    }
+)";
 
 class GradientBackground final : public QWidget {
 public:
@@ -170,6 +205,32 @@ QPushButton *makePillButton(const QIcon &icon, const QString &text, QWidget *par
     return button;
 }
 
+QFrame *makeBarDivider(QWidget *parent)
+{
+    auto *divider = new QFrame(parent);
+    divider->setFrameShape(QFrame::VLine);
+    divider->setFixedHeight(38);
+    divider->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 70);"));
+    return divider;
+}
+
+QPushButton *makePlaybackCircleButton(const QString &text, const QString &color, QWidget *parent)
+{
+    auto *button = new QPushButton(text, parent);
+    button->setFixedSize(36, 36);
+    button->setStyleSheet(QString::fromUtf8(playbackButtonStyle) + QStringLiteral("QPushButton { color: %1; }").arg(color));
+    return button;
+}
+
+QSlider *makePlaybackSlider(QWidget *parent)
+{
+    auto *slider = new QSlider(Qt::Horizontal, parent);
+    slider->setRange(0, 100);
+    slider->setFixedWidth(170);
+    slider->setStyleSheet(QString::fromUtf8(playbackSliderStyle));
+    return slider;
+}
+
 void addInfoRow(QVBoxLayout *layout, QWidget *parent, const QString &symbol, const QString &title, const QString &body)
 {
     auto *row = new QHBoxLayout();
@@ -204,10 +265,30 @@ MainWindow::MainWindow(QWidget *parent)
     setMinimumSize(820, 520);
 
     buildStoppedState();
+
+    controlsHideTimer_ = new QTimer(this);
+    controlsHideTimer_->setSingleShot(true);
+    controlsHideTimer_->setInterval(3000);
+    connect(controlsHideTimer_, &QTimer::timeout, this, [this]() { hidePlaybackControls(); });
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == centralWidget() && playbackControls_ && event->type() == QEvent::MouseMove) {
+        showPlaybackControls();
+        resetPlaybackControlsTimer();
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::buildStoppedState()
 {
+    playbackControls_.clear();
+    if (controlsHideTimer_ != nullptr) {
+        controlsHideTimer_->stop();
+    }
+
     auto *root = new GradientBackground(this);
     auto *rootLayout = new QVBoxLayout(root);
     rootLayout->setContentsMargins(24, 24, 24, 18);
@@ -265,12 +346,16 @@ void MainWindow::buildStoppedState()
     playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
     playButton->setIconSize(QSize(42, 42));
     playButton->setFixedSize(72, 72);
-    playButton->setEnabled(false);
-    playButton->setToolTip(QStringLiteral("Mock playback is not wired yet."));
+    playButton->setEnabled(true);
+    playButton->setToolTip(QStringLiteral("Start mock playback."));
     playButton->setStyleSheet(QStringLiteral(
         "QPushButton { color: white; border-radius: 36px; border: none; "
         "background-color: rgba(255, 255, 255, 85); }"
         "QPushButton:disabled { background-color: rgba(255, 255, 255, 34); }"));
+    connect(playButton, &QPushButton::clicked, this, [this, playButton]() {
+        playButton->setEnabled(false);
+        startMockPlayback();
+    });
     panelLayout->addWidget(playButton, 0, Qt::AlignCenter);
 
     rootLayout->addWidget(panel, 0, Qt::AlignHCenter);
@@ -304,6 +389,121 @@ void MainWindow::buildStoppedState()
     rootLayout->addLayout(buttonRow);
 
     setCentralWidget(root);
+}
+
+void MainWindow::startMockPlayback()
+{
+    showConnectingState();
+    QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
+}
+
+void MainWindow::showConnectingState()
+{
+    playbackControls_.clear();
+    if (controlsHideTimer_ != nullptr) {
+        controlsHideTimer_->stop();
+    }
+
+    auto *root = new QWidget(this);
+    root->setStyleSheet(QStringLiteral("background-color: black;"));
+
+    auto *layout = new QVBoxLayout(root);
+    layout->setContentsMargins(24, 24, 24, 24);
+
+    auto *label = new QLabel(QStringLiteral("Connecting to Capture Card..."), root);
+    label->setAlignment(Qt::AlignCenter);
+    label->setStyleSheet(QStringLiteral("color: #808080; font-size: 32px; font-weight: 500;"));
+
+    layout->addWidget(label, 1);
+    setCentralWidget(root);
+}
+
+void MainWindow::showPlaybackState()
+{
+    auto *root = new QWidget(this);
+    root->setStyleSheet(QStringLiteral("background-color: black;"));
+    root->setMouseTracking(true);
+    root->installEventFilter(this);
+
+    auto *layout = new QVBoxLayout(root);
+    layout->setContentsMargins(24, 24, 24, 32);
+    layout->addStretch();
+
+    auto *controls = new QFrame(root);
+    controls->setFixedHeight(58);
+    controls->setStyleSheet(QStringLiteral(
+        "QFrame { background-color: rgba(34, 34, 34, 221); "
+        "border: 1px solid rgba(68, 68, 68, 238); border-radius: 29px; }"));
+
+    auto *controlsLayout = new QHBoxLayout(controls);
+    controlsLayout->setContentsMargins(12, 4, 12, 4);
+    controlsLayout->setSpacing(10);
+
+    auto *powerButton = makePlaybackCircleButton(QStringLiteral("P"), QStringLiteral("#ff453a"), controls);
+    auto *volumeButton = makePlaybackCircleButton(QStringLiteral("V"), QStringLiteral("white"), controls);
+    auto *zoomOut = new QLabel(QStringLiteral("-"), controls);
+    auto *zoomIn = new QLabel(QStringLiteral("+"), controls);
+    auto *settingsButton = makePlaybackCircleButton(QStringLiteral("S"), QStringLiteral("white"), controls);
+
+    zoomOut->setAlignment(Qt::AlignCenter);
+    zoomIn->setAlignment(Qt::AlignCenter);
+    zoomOut->setStyleSheet(QStringLiteral("color: white; font-size: 40px; font-weight: 300; border: none;"));
+    zoomIn->setStyleSheet(QStringLiteral("color: white; font-size: 34px; font-weight: 300; border: none;"));
+
+    auto *volumeSlider = makePlaybackSlider(controls);
+    volumeSlider->setValue(settings_.volumePercent());
+    auto *zoomSlider = makePlaybackSlider(controls);
+    zoomSlider->setValue(0);
+
+    connect(powerButton, &QPushButton::clicked, this, [this]() { stopPlayback(); });
+    connect(settingsButton, &QPushButton::clicked, this, [this]() { showSettingsDialog(); });
+    connect(volumeSlider, &QSlider::valueChanged, this, [this](const int value) {
+        settings_.setVolumePercent(value);
+        resetPlaybackControlsTimer();
+    });
+
+    controlsLayout->addWidget(powerButton);
+    controlsLayout->addWidget(makeBarDivider(controls));
+    controlsLayout->addWidget(volumeButton);
+    controlsLayout->addWidget(volumeSlider);
+    controlsLayout->addWidget(makeBarDivider(controls));
+    controlsLayout->addWidget(zoomOut);
+    controlsLayout->addWidget(zoomSlider);
+    controlsLayout->addWidget(zoomIn);
+    controlsLayout->addWidget(makeBarDivider(controls));
+    controlsLayout->addWidget(settingsButton);
+
+    layout->addWidget(controls, 0, Qt::AlignHCenter | Qt::AlignBottom);
+    playbackControls_ = controls;
+    setCentralWidget(root);
+    showPlaybackControls();
+    resetPlaybackControlsTimer();
+}
+
+void MainWindow::stopPlayback()
+{
+    buildStoppedState();
+}
+
+void MainWindow::showPlaybackControls()
+{
+    if (playbackControls_) {
+        playbackControls_->show();
+    }
+}
+
+void MainWindow::hidePlaybackControls()
+{
+    if (playbackControls_) {
+        playbackControls_->hide();
+    }
+}
+
+void MainWindow::resetPlaybackControlsTimer()
+{
+    if (controlsHideTimer_ != nullptr && playbackControls_) {
+        controlsHideTimer_->start();
+    }
 }
 
 void MainWindow::showSettingsDialog()

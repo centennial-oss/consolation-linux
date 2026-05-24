@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
     QApplication::setWindowIcon(consolation::ui::createAppIcon());
 
     consolation::ui::MainWindow window;
-    window.show();
+    window.showMaximized();
 
     return QApplication::exec();
 }
