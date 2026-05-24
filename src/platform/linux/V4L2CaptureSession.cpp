@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/videodev2.h>
+#include <numeric>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -31,6 +33,39 @@ quint32 stringToFourCc(const QString &value)
         return 0;
     }
     return v4l2_fourcc(latin[0], latin[1], latin[2], latin[3]);
+}
+
+QString fourCcToString(const quint32 fourcc)
+{
+    char chars[4] = {
+        static_cast<char>(fourcc & 0xff),
+        static_cast<char>((fourcc >> 8) & 0xff),
+        static_cast<char>((fourcc >> 16) & 0xff),
+        static_cast<char>((fourcc >> 24) & 0xff),
+    };
+    return QString::fromLatin1(chars, 4).trimmed();
+}
+
+v4l2_fract fpsToTimePerFrame(const double fps)
+{
+    if (fps <= 0.0) {
+        return {};
+    }
+
+    auto numerator = 1000U;
+    auto denominator = static_cast<unsigned int>(std::round(fps * 1000.0));
+    const auto divisor = std::gcd(numerator, denominator);
+    numerator /= divisor;
+    denominator /= divisor;
+    return v4l2_fract{numerator, denominator};
+}
+
+double timePerFrameToFps(const v4l2_fract &timePerFrame)
+{
+    if (timePerFrame.numerator == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(timePerFrame.denominator) / static_cast<double>(timePerFrame.numerator);
 }
 
 int clampColor(const int value)
@@ -107,22 +142,42 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
         return false;
     }
 
-    int input = 0;
-    if (xioctl(fd_, VIDIOC_G_INPUT, &input) != 0) {
-        if (errno == EBUSY) {
-            emit failed(QStringLiteral(
-                "%1 is busy before capture starts. On this system, PipeWire/WirePlumber may be holding the USB capture card through the desktop camera stack. "
-                "Close camera apps or temporarily stop the user PipeWire/WirePlumber camera services before using direct V4L2 capture.")
-                            .arg(device.devicePath));
-            return false;
-        }
-        emit failed(QStringLiteral("Could not query capture input for %1: %2").arg(
-            device.devicePath,
+    const auto requestedPixelFormat = stringToFourCc(format.pixelFormat);
+    if (format.width <= 0 || format.height <= 0 || requestedPixelFormat == 0) {
+        emit failed(QStringLiteral("Invalid V4L2 capture format: %1").arg(format.label));
+        return false;
+    }
+
+    v4l2_format requested {};
+    requested.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    requested.fmt.pix.width = static_cast<__u32>(format.width);
+    requested.fmt.pix.height = static_cast<__u32>(format.height);
+    requested.fmt.pix.pixelformat = requestedPixelFormat;
+    requested.fmt.pix.field = V4L2_FIELD_NONE;
+
+    emit logMessage(QStringLiteral("V4L2 request format %1x%2 %3 @ %4 fps")
+                        .arg(format.width)
+                        .arg(format.height)
+                        .arg(format.pixelFormat)
+                        .arg(format.framesPerSecond, 0, 'f', 2));
+
+    if (xioctl(fd_, VIDIOC_S_FMT, &requested) != 0) {
+        emit failed(QStringLiteral("Could not set capture format %1: %2").arg(
+            format.label,
             QString::fromLocal8Bit(std::strerror(errno))));
         return false;
     }
 
-    Q_UNUSED(format);
+    v4l2_streamparm requestedParm {};
+    requestedParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    requestedParm.parm.capture.timeperframe = fpsToTimePerFrame(format.framesPerSecond);
+    if (requestedParm.parm.capture.timeperframe.numerator != 0 &&
+        xioctl(fd_, VIDIOC_S_PARM, &requestedParm) != 0) {
+        emit failed(QStringLiteral("Could not set capture frame rate %1 fps: %2").arg(
+            QString::number(format.framesPerSecond, 'f', 2),
+            QString::fromLocal8Bit(std::strerror(errno))));
+        return false;
+    }
 
     v4l2_format current {};
     current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -131,9 +186,37 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
         return false;
     }
 
+    v4l2_streamparm currentParm {};
+    currentParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    const auto hasCurrentFps = xioctl(fd_, VIDIOC_G_PARM, &currentParm) == 0;
+    const auto acceptedFps = hasCurrentFps ? timePerFrameToFps(currentParm.parm.capture.timeperframe) : 0.0;
+
     width_ = static_cast<int>(current.fmt.pix.width);
     height_ = static_cast<int>(current.fmt.pix.height);
     pixelFormat_ = current.fmt.pix.pixelformat;
+
+    emit logMessage(QStringLiteral("V4L2 accepted format %1x%2 %3%4")
+                        .arg(width_)
+                        .arg(height_)
+                        .arg(fourCcToString(pixelFormat_))
+                        .arg(hasCurrentFps
+                                 ? QStringLiteral(" @ %1 fps").arg(acceptedFps, 0, 'f', 2)
+                                 : QString()));
+
+    if (width_ != format.width || height_ != format.height || pixelFormat_ != requestedPixelFormat) {
+        emit failed(QStringLiteral("Capture device accepted %1x%2 %3 instead of requested %4.").arg(
+            QString::number(width_),
+            QString::number(height_),
+            fourCcToString(pixelFormat_),
+            format.label));
+        return false;
+    }
+    if (hasCurrentFps && format.framesPerSecond > 0.0 && std::abs(acceptedFps - format.framesPerSecond) > 0.5) {
+        emit failed(QStringLiteral("Capture device accepted %1 fps instead of requested %2 fps.").arg(
+            QString::number(acceptedFps, 'f', 2),
+            QString::number(format.framesPerSecond, 'f', 2)));
+        return false;
+    }
 
     return true;
 }

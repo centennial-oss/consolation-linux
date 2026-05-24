@@ -7,7 +7,6 @@ namespace consolation::capture {
 
 enum class CaptureBackend {
     Mock,
-    PipeWire,
     V4L2,
 };
 

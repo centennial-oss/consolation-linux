@@ -10,8 +10,6 @@ QString backendName(const consolation::capture::CaptureBackend backend)
     switch (backend) {
     case consolation::capture::CaptureBackend::Mock:
         return QStringLiteral("mock");
-    case consolation::capture::CaptureBackend::PipeWire:
-        return QStringLiteral("pipewire");
     case consolation::capture::CaptureBackend::V4L2:
         return QStringLiteral("v4l2");
     }

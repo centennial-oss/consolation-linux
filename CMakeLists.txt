@@ -13,11 +13,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets)
-find_package(PkgConfig QUIET)
-
-if(PkgConfig_FOUND)
-    pkg_check_modules(PIPEWIRE QUIET libpipewire-0.3)
-endif()
 
 qt_standard_project_setup()
 
@@ -37,10 +32,6 @@ add_library(consolation_core STATIC
     src/capture/CaptureBackendManager.h
     src/capture/CaptureSession.h
     src/capture/CaptureTypes.h
-    src/platform/linux/PipeWireDeviceDiscovery.cpp
-    src/platform/linux/PipeWireDeviceDiscovery.h
-    src/platform/linux/PipeWireCaptureSession.cpp
-    src/platform/linux/PipeWireCaptureSession.h
     src/platform/linux/V4L2CaptureSession.cpp
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp
@@ -60,13 +51,6 @@ target_link_libraries(consolation_core
         Qt6::Core
         Qt6::Gui
 )
-
-if(PIPEWIRE_FOUND)
-    target_compile_definitions(consolation_core PRIVATE CONSOLATION_HAS_PIPEWIRE=1)
-    target_include_directories(consolation_core PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
-    target_link_libraries(consolation_core PRIVATE ${PIPEWIRE_LIBRARIES})
-    target_link_directories(consolation_core PRIVATE ${PIPEWIRE_LIBRARY_DIRS})
-endif()
 
 add_executable(consolation
     src/app/main.cpp
@@ -116,4 +100,13 @@ add_executable(headless_capture
 target_link_libraries(headless_capture
     PRIVATE
         consolation_core
+)
+
+add_executable(v4l2_config_probe
+    tests/v4l2_config_probe.cpp
+)
+
+target_link_libraries(v4l2_config_probe
+    PRIVATE
+        Qt6::Core
 )

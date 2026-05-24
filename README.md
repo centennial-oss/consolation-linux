@@ -40,7 +40,7 @@ Linux capture device testing is in progress. The other Consolation ports have be
 
 ### Running
 
-- A modern Linux distribution, recent as of January 2025, with support for Qt 6, V4L2, and either PipeWire or ALSA
+- A modern Linux distribution, recent as of January 2025, with support for Qt 6 and V4L2
 - A UVC-compliant video capture card
 
 ### Developer
