@@ -37,6 +37,8 @@ int main(int argc, char *argv[])
             << device.displayName << " " << device.devicePath
             << " stableId=" << device.stableId
             << " nodeId=" << device.backendNodeId
+            << " v4l2=" << device.v4l2DevicePath
+            << " nodeName=" << device.nodeName
             << " formats=" << device.formats.size() << "\n";
         for (const auto &format : device.formats) {
             out << "    " << format.label << "\n";

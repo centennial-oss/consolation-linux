@@ -24,6 +24,8 @@ struct CaptureDevice {
     QString devicePath;
     QString displayName;
     QString stableId;
+    QString nodeName;
+    QString v4l2DevicePath;
     quint32 backendNodeId = 0;
     std::vector<CaptureFormat> formats;
 };

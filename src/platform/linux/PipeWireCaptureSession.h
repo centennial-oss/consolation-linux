@@ -24,6 +24,16 @@ public:
     [[nodiscard]] QImage imageFromBuffer(void *buffer) const;
 
 private:
+    void scheduleFormatRetry();
+    void emitCaptureFailed(const QString &message);
+
+    capture::CaptureDevice pendingDevice_;
+    capture::CaptureFormat pendingFormat_;
+    QString preferredTargetObject_;
+    int formatErrorRetries_ = 0;
+    bool retryingStart_ = false;
+    bool useNodeNameTarget_ = false;
+
     void *threadLoop_ = nullptr;
     void *context_ = nullptr;
     void *core_ = nullptr;

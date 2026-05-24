@@ -278,6 +278,7 @@ std::vector<capture::CaptureDevice> V4L2DeviceDiscovery::enumerateDevices() cons
         capture::CaptureDevice device;
         device.backend = capture::CaptureBackend::V4L2;
         device.devicePath = path;
+        device.v4l2DevicePath = path;
         device.displayName = QString::fromLocal8Bit(reinterpret_cast<const char *>(capability.card)).trimmed();
         if (device.displayName.isEmpty()) {
             device.displayName = QFileInfo(path).fileName();

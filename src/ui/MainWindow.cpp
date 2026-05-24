@@ -460,31 +460,114 @@ void MainWindow::startPlayback()
         return;
     }
 
-    if (captureSession_) {
-        captureSession_->stop();
-        captureSession_.reset();
+    const auto selectedStableId = selectedDevice_.stableId;
+    const auto selectedV4l2Path = selectedDevice_.v4l2DevicePath.isEmpty()
+        ? selectedDevice_.devicePath
+        : selectedDevice_.v4l2DevicePath;
+    const auto selectedDisplayName = selectedDevice_.displayName;
+    const auto selectedFormatLabel = selectedFormat_.label;
+
+    devices_ = capture::CaptureBackendManager().enumerateDevices();
+    auto refreshedDeviceIndex = -1;
+    for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
+        const auto &device = devices_[static_cast<size_t>(index)];
+        if (!selectedStableId.isEmpty() && device.stableId == selectedStableId) {
+            refreshedDeviceIndex = index;
+            break;
+        }
+        if (!selectedV4l2Path.isEmpty() &&
+            (device.v4l2DevicePath == selectedV4l2Path || device.devicePath == selectedV4l2Path)) {
+            refreshedDeviceIndex = index;
+            break;
+        }
+        if (!selectedDisplayName.isEmpty() && device.displayName == selectedDisplayName) {
+            refreshedDeviceIndex = index;
+        }
     }
-    captureSession_ = capture::CaptureBackendManager().createSession(selectedDevice_.backend);
-    if (!captureSession_) {
-        QMessageBox::warning(this, QStringLiteral("Capture Failed"), QStringLiteral("No capture backend is available for the selected device yet."));
+
+    if (refreshedDeviceIndex < 0) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Capture Failed"),
+            QStringLiteral(
+                "The selected capture device is no longer available. It may still be reconnecting after a USB reset."));
         stopPlayback();
         return;
     }
-    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
-        if (!videoSurface_) {
-            showPlaybackState(frame);
-            return;
-        }
-        updateVideoFrame(frame);
-    });
-    connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
-        QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
-        stopPlayback();
-    });
 
-    if (!captureSession_->start(selectedDevice_, selectedFormat_)) {
-        stopPlayback();
+    selectedDevice_ = devices_[static_cast<size_t>(refreshedDeviceIndex)];
+    auto refreshedFormatIndex = 0;
+    for (auto index = 0; index < static_cast<int>(selectedDevice_.formats.size()); ++index) {
+        if (selectedDevice_.formats[static_cast<size_t>(index)].label == selectedFormatLabel) {
+            refreshedFormatIndex = index;
+            break;
+        }
     }
+    selectedFormat_ = selectedDevice_.formats[static_cast<size_t>(refreshedFormatIndex)];
+
+    const auto beginCapture = [&]() -> bool {
+        if (captureSession_) {
+            captureSession_->stop();
+            captureSession_.reset();
+        }
+
+        captureSession_ = capture::CaptureBackendManager().createSession(selectedDevice_.backend);
+        if (!captureSession_) {
+            return false;
+        }
+
+        connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
+            if (!videoSurface_) {
+                showPlaybackState(frame);
+                return;
+            }
+            updateVideoFrame(frame);
+        });
+        connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
+            QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
+            stopPlayback();
+        });
+
+        return captureSession_->start(selectedDevice_, selectedFormat_);
+    };
+
+    if (beginCapture()) {
+        return;
+    }
+
+    if (selectedDevice_.backend == capture::CaptureBackend::V4L2) {
+        for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
+            const auto &device = devices_[static_cast<size_t>(index)];
+            if (device.backend != capture::CaptureBackend::PipeWire) {
+                continue;
+            }
+            if (!selectedV4l2Path.isEmpty() && device.v4l2DevicePath != selectedV4l2Path) {
+                continue;
+            }
+            if (!selectedDisplayName.isEmpty() && device.displayName != selectedDisplayName) {
+                continue;
+            }
+
+            selectedDevice_ = device;
+            if (selectedDevice_.formats.size() == 1 &&
+                selectedDevice_.formats.front().pixelFormat == QStringLiteral("PipeWire")) {
+                selectedFormat_ = selectedDevice_.formats.front();
+            }
+            if (beginCapture()) {
+                return;
+            }
+            break;
+        }
+    }
+
+    if (!captureSession_) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Capture Failed"),
+            QStringLiteral("No capture backend is available for the selected device yet."));
+    }
+
+    stopPlayback();
 }
 
 void MainWindow::showConnectingState()

@@ -1,6 +1,9 @@
 #include "platform/linux/PipeWireCaptureSession.h"
 
+#include "platform/linux/PipeWireDeviceDiscovery.h"
+
 #include <QMetaObject>
+#include <QTimer>
 
 #include <algorithm>
 #include <cstring>
@@ -73,6 +76,15 @@ PipeWireCaptureSession::~PipeWireCaptureSession()
 bool PipeWireCaptureSession::start(const capture::CaptureDevice &device, const capture::CaptureFormat &format)
 {
     Q_UNUSED(format);
+    if (!retryingStart_) {
+        formatErrorRetries_ = 0;
+        useNodeNameTarget_ = false;
+        pendingDevice_ = device;
+        pendingFormat_ = format;
+    } else {
+        retryingStart_ = false;
+    }
+
     stop();
 
     static bool initialized = false;
@@ -105,13 +117,15 @@ bool PipeWireCaptureSession::start(const capture::CaptureDevice &device, const c
         return false;
     }
 
-    auto target = device.stableId.toUtf8();
-    bool hasNumericTarget = false;
-    const auto targetId = device.stableId.toUInt(&hasNumericTarget);
-    emit logMessage(QStringLiteral("PipeWire target stableId=%1 nodeId=%2 connectTarget=%3")
+    preferredTargetObject_ = useNodeNameTarget_ && !device.nodeName.isEmpty()
+        ? device.nodeName
+        : PipeWireDeviceDiscovery().resolveTargetObject(device);
+    const bool hasTargetObject = !preferredTargetObject_.isEmpty();
+    emit logMessage(QStringLiteral("PipeWire target stableId=%1 nodeId=%2 connectTarget=%3 v4l2=%4")
                         .arg(device.stableId)
                         .arg(device.backendNodeId)
-                        .arg(hasNumericTarget ? QString::number(targetId) : QStringLiteral("auto")));
+                        .arg(hasTargetObject ? preferredTargetObject_ : QStringLiteral("auto"))
+                        .arg(device.v4l2DevicePath));
     auto *properties = pw_properties_new(
         PW_KEY_MEDIA_TYPE,
         "Video",
@@ -120,8 +134,10 @@ bool PipeWireCaptureSession::start(const capture::CaptureDevice &device, const c
         PW_KEY_MEDIA_ROLE,
         "Camera",
         nullptr);
-    if (!hasNumericTarget) {
-        pw_properties_set(properties, PW_KEY_TARGET_OBJECT, target.constData());
+    if (hasTargetObject) {
+        // PipeWire selects the camera via PW_KEY_TARGET_OBJECT (object serial or node
+        // name); pw_stream_connect() must use PW_ID_ANY with AUTOCONNECT.
+        pw_properties_set(properties, PW_KEY_TARGET_OBJECT, preferredTargetObject_.toUtf8().constData());
     }
     stream_ = pw_stream_new(static_cast<pw_core *>(core_), "Consolation Video Capture", properties);
     if (stream_ == nullptr) {
@@ -137,16 +153,18 @@ bool PipeWireCaptureSession::start(const capture::CaptureDevice &device, const c
         &streamEvents,
         this);
 
+    // Keep PipeWire format offers minimal. USB capture cards often reset when the
+    // PipeWire v4l2 source runs extended VIDIOC_S_FMT negotiation across many formats.
+    static constexpr spa_video_format offeredFormat = SPA_VIDEO_FORMAT_YUY2;
+
     uint8_t formatBuffer[1024];
     spa_pod_builder builder = SPA_POD_BUILDER_INIT(formatBuffer, sizeof(formatBuffer));
     const spa_rectangle defaultSize = SPA_RECTANGLE(1280, 720);
     const spa_rectangle minSize = SPA_RECTANGLE(1, 1);
     const spa_rectangle maxSize = SPA_RECTANGLE(4096, 4096);
-    const spa_fraction defaultFramerate = SPA_FRACTION(30, 1);
-    const spa_fraction minFramerate = SPA_FRACTION(0, 1);
-    const spa_fraction maxFramerate = SPA_FRACTION(240, 1);
-    const spa_pod *params[1];
-    params[0] = reinterpret_cast<spa_pod *>(spa_pod_builder_add_object(
+    const spa_pod *params[2];
+    uint32_t paramCount = 0;
+    params[paramCount++] = reinterpret_cast<spa_pod *>(spa_pod_builder_add_object(
         &builder,
         SPA_TYPE_OBJECT_Format,
         SPA_PARAM_EnumFormat,
@@ -155,29 +173,29 @@ bool PipeWireCaptureSession::start(const capture::CaptureDevice &device, const c
         SPA_FORMAT_mediaSubtype,
         SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
         SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(
-            5,
-            SPA_VIDEO_FORMAT_NV12,
-            SPA_VIDEO_FORMAT_NV12,
-            SPA_VIDEO_FORMAT_YUY2,
-            SPA_VIDEO_FORMAT_BGRx,
-            SPA_VIDEO_FORMAT_RGBx),
+        SPA_POD_Id(offeredFormat),
         SPA_FORMAT_VIDEO_size,
-        SPA_POD_CHOICE_RANGE_Rectangle(&defaultSize, &minSize, &maxSize),
-        SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_CHOICE_RANGE_Fraction(&defaultFramerate, &minFramerate, &maxFramerate)));
+        SPA_POD_CHOICE_RANGE_Rectangle(&defaultSize, &minSize, &maxSize)));
+
+    spa_video_info_raw withModifier = SPA_VIDEO_INFO_RAW_INIT(
+        .format = offeredFormat,
+        .flags = SPA_VIDEO_FLAG_MODIFIER,
+        .modifier = 0);
+    params[paramCount++] = spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &withModifier);
+
+    const auto connectFlags = static_cast<pw_stream_flags>(
+        PW_STREAM_FLAG_AUTOCONNECT |
+        PW_STREAM_FLAG_DONT_RECONNECT |
+        PW_STREAM_FLAG_ASYNC |
+        PW_STREAM_FLAG_MAP_BUFFERS);
 
     const auto result = pw_stream_connect(
         static_cast<pw_stream *>(stream_),
         PW_DIRECTION_INPUT,
-        hasNumericTarget ? targetId : PW_ID_ANY,
-        static_cast<pw_stream_flags>(
-            PW_STREAM_FLAG_AUTOCONNECT |
-            PW_STREAM_FLAG_DONT_RECONNECT |
-            PW_STREAM_FLAG_ASYNC |
-            PW_STREAM_FLAG_MAP_BUFFERS),
+        PW_ID_ANY,
+        connectFlags,
         params,
-        1);
+        paramCount);
     if (result < 0) {
         pw_thread_loop_unlock(static_cast<pw_thread_loop *>(threadLoop_));
         emit failed(QStringLiteral("Could not connect PipeWire stream: %1").arg(QString::fromLocal8Bit(std::strerror(-result))));
@@ -228,17 +246,54 @@ void PipeWireCaptureSession::iteratePipeWire()
 {
 }
 
+void PipeWireCaptureSession::emitCaptureFailed(const QString &message)
+{
+    QMetaObject::invokeMethod(this, [this, message]() { emit failed(message); }, Qt::QueuedConnection);
+}
+
+void PipeWireCaptureSession::scheduleFormatRetry()
+{
+    if (formatErrorRetries_ >= 3) {
+        emitCaptureFailed(QStringLiteral(
+            "PipeWire could not negotiate a video format. The capture card may have reset during USB reconnect; try Play again after the device settles."));
+        return;
+    }
+
+    ++formatErrorRetries_;
+    useNodeNameTarget_ = formatErrorRetries_ == 2;
+    const auto delayMs = 1500 * formatErrorRetries_;
+    emit logMessage(QStringLiteral("PipeWire format negotiation failed; retrying in %1 ms (attempt %2)")
+                        .arg(delayMs)
+                        .arg(formatErrorRetries_));
+
+    QMetaObject::invokeMethod(
+        this,
+        [this, delayMs]() {
+            QTimer::singleShot(delayMs, this, [this]() {
+                retryingStart_ = true;
+                static_cast<void>(start(pendingDevice_, pendingFormat_));
+            });
+        },
+        Qt::QueuedConnection);
+}
+
 void PipeWireCaptureSession::handleStateChanged(const int state, const char *error)
 {
-    const auto message = QStringLiteral("state changed to %1%2")
+    const auto message = QStringLiteral("state changed to %1 (%2)%3")
                              .arg(state)
+                             .arg(QString::fromUtf8(pw_stream_state_as_string(static_cast<pw_stream_state>(state))))
                              .arg(error == nullptr ? QString() : QStringLiteral(" error=%1").arg(QString::fromUtf8(error)));
     QMetaObject::invokeMethod(this, [this, message]() { emit logMessage(message); }, Qt::QueuedConnection);
 
     if (state == PW_STREAM_STATE_ERROR) {
-        const auto message = QStringLiteral("PipeWire stream failed: %1")
-                                 .arg(error == nullptr ? QStringLiteral("unknown error") : QString::fromUtf8(error));
-        QMetaObject::invokeMethod(this, [this, message]() { emit failed(message); }, Qt::QueuedConnection);
+        const auto errorText = error == nullptr ? QString() : QString::fromUtf8(error);
+        if (errorText.contains(QStringLiteral("no more input formats"), Qt::CaseInsensitive)) {
+            QMetaObject::invokeMethod(this, [this]() { scheduleFormatRetry(); }, Qt::QueuedConnection);
+            return;
+        }
+
+        emitCaptureFailed(QStringLiteral("PipeWire stream failed: %1")
+                              .arg(errorText.isEmpty() ? QStringLiteral("unknown error") : errorText));
     }
 }
 
