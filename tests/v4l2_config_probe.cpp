@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <libv4l2.h>
 #include <linux/videodev2.h>
 #include <numeric>
 #include <sys/ioctl.h>
@@ -17,7 +18,7 @@ int xioctl(const int fd, const unsigned long request, void *arg)
 {
     int result = 0;
     do {
-        result = ::ioctl(fd, request, arg);
+        result = v4l2_ioctl(fd, request, arg);
     } while (result == -1 && errno == EINTR);
     return result;
 }
@@ -85,6 +86,13 @@ v4l2_format makeFormat(const int width, const int height, const quint32 pixelFor
     return format;
 }
 
+void setRequestedFormat(v4l2_format &format, const int width, const int height, const quint32 pixelFormat)
+{
+    format.fmt.pix.width = static_cast<__u32>(width);
+    format.fmt.pix.height = static_cast<__u32>(height);
+    format.fmt.pix.pixelformat = pixelFormat;
+}
+
 void logFormat(QTextStream &out, const QString &label, const v4l2_format &format)
 {
     out << label << ": "
@@ -122,7 +130,7 @@ int main(int argc, char *argv[])
     const auto fps = parser.value(fpsOption).toDouble();
 
     out << "open " << device << "\n";
-    const int fd = ::open(device.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    const int fd = v4l2_open(device.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         out << "open: failed errno=" << errno << " " << errnoText() << "\n";
         return 2;
@@ -154,8 +162,8 @@ int main(int argc, char *argv[])
         logFormat(out, QStringLiteral("  current"), current);
     }
 
-    auto requested = makeFormat(width, height, pixelFormat);
-    auto tryFormat = requested;
+    auto tryFormat = current;
+    setRequestedFormat(tryFormat, width, height, pixelFormat);
     result = xioctl(fd, VIDIOC_TRY_FMT, &tryFormat);
     logResult(out, QStringLiteral("VIDIOC_TRY_FMT"), result);
     if (result == 0) {
@@ -179,7 +187,8 @@ int main(int argc, char *argv[])
         out << "  accepted fps=" << fpsFromTimePerFrame(streamParm.parm.capture.timeperframe) << "\n";
     }
 
-    requested = makeFormat(width, height, pixelFormat);
+    auto requested = current;
+    setRequestedFormat(requested, width, height, pixelFormat);
     result = xioctl(fd, VIDIOC_S_FMT, &requested);
     logResult(out, QStringLiteral("VIDIOC_S_FMT"), result);
     if (result == 0) {
@@ -195,6 +204,6 @@ int main(int argc, char *argv[])
         out << "  accepted fps=" << fpsFromTimePerFrame(streamParm.parm.capture.timeperframe) << "\n";
     }
 
-    ::close(fd);
+    v4l2_close(fd);
     return 0;
 }

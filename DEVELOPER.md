@@ -1,6 +1,6 @@
 # Developer Setup
 
-Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, CMake, a C++ compiler, and Linux V4L2 headers for the capture path.
+Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, CMake, a C++ compiler, and libv4l2 for the capture path.
 
 ## Fedora / Asahi Linux
 
@@ -10,6 +10,7 @@ Install the dependencies needed to configure, build, and test the app:
 sudo dnf install \
   cmake \
   gcc-c++ \
+  libv4l-devel \
   ninja-build \
   qt6-qtbase-devel
 ```
@@ -22,11 +23,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-ALSA and MJPEG work use these additional development packages:
+ALSA and MJPEG decoder work use these additional development packages:
 
 ```sh
 sudo dnf install \
-  libv4l-devel \
   alsa-lib-devel \
   libjpeg-turbo-devel \
   systemd-devel

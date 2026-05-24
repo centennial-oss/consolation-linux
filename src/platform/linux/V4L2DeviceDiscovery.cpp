@@ -72,6 +72,20 @@ QString formatFps(const double fps)
     return QString::number(fps, 'f', 2);
 }
 
+int pixelFormatRank(const QString &pixelFormat)
+{
+    if (pixelFormat == QStringLiteral("YUYV") || pixelFormat == QStringLiteral("YUY2")) {
+        return 0;
+    }
+    if (pixelFormat == QStringLiteral("NV12") || pixelFormat == QStringLiteral("YU12") || pixelFormat == QStringLiteral("YV12")) {
+        return 1;
+    }
+    if (pixelFormat == QStringLiteral("MJPG") || pixelFormat == QStringLiteral("JPEG")) {
+        return 2;
+    }
+    return 3;
+}
+
 void addFormat(
     std::vector<capture::CaptureFormat> &formats,
     std::set<QString> &seen,
@@ -208,6 +222,9 @@ std::vector<capture::CaptureFormat> enumerateFormats(const int fd)
         }
         if (std::abs(left.framesPerSecond - right.framesPerSecond) > 0.01) {
             return left.framesPerSecond > right.framesPerSecond;
+        }
+        if (pixelFormatRank(left.pixelFormat) != pixelFormatRank(right.pixelFormat)) {
+            return pixelFormatRank(left.pixelFormat) < pixelFormatRank(right.pixelFormat);
         }
         return left.pixelFormat < right.pixelFormat;
     });
