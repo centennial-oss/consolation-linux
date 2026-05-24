@@ -12,5 +12,8 @@ sync-linux:
 build-linux: sync-linux
 	ssh $(LINUX_HOST) 'cd $(LINUX_DIR) && cmake -S . -B build && cmake --build build'
 
-test-linux: sync-linux
+test-linux: build-linux
 	ssh $(LINUX_HOST) 'cd $(LINUX_DIR) && ctest --test-dir build --output-on-failure'
+
+run-headless: build-linux
+	ssh $(LINUX_HOST) 'cd $(LINUX_DIR) && ./build/headless_capture'

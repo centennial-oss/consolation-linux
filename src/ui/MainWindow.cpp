@@ -2,6 +2,8 @@
 
 #include "AppMetadata.h"
 #include "app/BuildInfo.h"
+#include "capture/CaptureBackendManager.h"
+#include "capture/CaptureSession.h"
 #include "ui/AppIcon.h"
 
 #include <QApplication>
@@ -17,10 +19,13 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSize>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QStyle>
 #include <QStringList>
@@ -29,6 +34,9 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <utility>
+#include <vector>
 
 namespace consolation::ui {
 
@@ -186,10 +194,9 @@ QFrame *makeDivider(QWidget *parent)
     return divider;
 }
 
-QComboBox *makeMockCombo(const QStringList &items, QWidget *parent)
+QComboBox *makeStartupCombo(QWidget *parent)
 {
     auto *combo = new QComboBox(parent);
-    combo->addItems(items);
     combo->setStyleSheet(QString::fromUtf8(comboStyle));
     combo->setMinimumWidth(320);
     combo->setMaximumWidth(340);
@@ -288,6 +295,7 @@ void MainWindow::buildStoppedState()
     if (controlsHideTimer_ != nullptr) {
         controlsHideTimer_->stop();
     }
+    devices_ = capture::CaptureBackendManager().enumerateDevices();
 
     auto *root = new GradientBackground(this);
     auto *rootLayout = new QVBoxLayout(root);
@@ -328,17 +336,34 @@ void MainWindow::buildStoppedState()
     form->setVerticalSpacing(30);
     form->setColumnMinimumWidth(0, 250);
 
+    auto *deviceCombo = makeStartupCombo(panel);
+    auto *formatCombo = makeStartupCombo(panel);
+
+    for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
+        const auto &device = devices_[index];
+        deviceCombo->addItem(
+            QStringLiteral("%1 (%2)").arg(device.displayName, device.devicePath),
+            index);
+    }
+
+    const auto refreshFormats = [this, deviceCombo, formatCombo]() {
+        formatCombo->clear();
+        const auto deviceIndex = deviceCombo->currentData().toInt();
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(devices_.size())) {
+            return;
+        }
+        const auto &device = devices_[deviceIndex];
+        for (auto formatIndex = 0; formatIndex < static_cast<int>(device.formats.size()); ++formatIndex) {
+            formatCombo->addItem(device.formats[formatIndex].label, formatIndex);
+        }
+    };
+    refreshFormats();
+
     form->addWidget(makeFieldLabel(QStringLiteral("Device"), panel), 0, 0);
-    form->addWidget(
-        makeMockCombo(QStringList{QStringLiteral("Mock Capture Device")}, panel),
-        0,
-        1);
+    form->addWidget(deviceCombo, 0, 1);
 
     form->addWidget(makeFieldLabel(QStringLiteral("Resolution & Frame Rate"), panel), 1, 0);
-    form->addWidget(
-        makeMockCombo(QStringList{QStringLiteral("1920x1080 @ 60p")}, panel),
-        1,
-        1);
+    form->addWidget(formatCombo, 1, 1);
 
     panelLayout->addLayout(form);
 
@@ -346,16 +371,51 @@ void MainWindow::buildStoppedState()
     playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
     playButton->setIconSize(QSize(42, 42));
     playButton->setFixedSize(72, 72);
-    playButton->setEnabled(true);
-    playButton->setToolTip(QStringLiteral("Start mock playback."));
+    playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
+    playButton->setToolTip(QStringLiteral("Start playback."));
     playButton->setStyleSheet(QStringLiteral(
         "QPushButton { color: white; border-radius: 36px; border: none; "
         "background-color: rgba(255, 255, 255, 85); }"
         "QPushButton:disabled { background-color: rgba(255, 255, 255, 34); }"));
     connect(playButton, &QPushButton::clicked, this, [this, playButton]() {
+        const auto deviceIndex = selectedDevice_.devicePath.isEmpty() ? -1 : 0;
+        Q_UNUSED(deviceIndex);
         playButton->setEnabled(false);
-        startMockPlayback();
+        startPlayback();
     });
+    connect(
+        deviceCombo,
+        &QComboBox::currentIndexChanged,
+        this,
+        [refreshFormats, playButton, deviceCombo, formatCombo](int) {
+            refreshFormats();
+            playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
+        });
+    connect(
+        formatCombo,
+        &QComboBox::currentIndexChanged,
+        this,
+        [playButton, deviceCombo, formatCombo](int) {
+            playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
+        });
+    const auto updateSelection = [this, deviceCombo, formatCombo]() {
+        const auto deviceIndex = deviceCombo->currentData().toInt();
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(devices_.size())) {
+            selectedDevice_ = {};
+            selectedFormat_ = {};
+            return;
+        }
+        selectedDevice_ = devices_[deviceIndex];
+        const auto formatIndex = formatCombo->currentData().toInt();
+        if (formatIndex < 0 || formatIndex >= static_cast<int>(selectedDevice_.formats.size())) {
+            selectedFormat_ = {};
+            return;
+        }
+        selectedFormat_ = selectedDevice_.formats[formatIndex];
+    };
+    connect(deviceCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
+    connect(formatCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
+    updateSelection();
     panelLayout->addWidget(playButton, 0, Qt::AlignCenter);
 
     rootLayout->addWidget(panel, 0, Qt::AlignHCenter);
@@ -391,10 +451,40 @@ void MainWindow::buildStoppedState()
     setCentralWidget(root);
 }
 
-void MainWindow::startMockPlayback()
+void MainWindow::startPlayback()
 {
     showConnectingState();
-    QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
+
+    if (selectedDevice_.devicePath.startsWith(QStringLiteral("mock://"))) {
+        QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
+        return;
+    }
+
+    if (captureSession_) {
+        captureSession_->stop();
+        captureSession_.reset();
+    }
+    captureSession_ = capture::CaptureBackendManager().createSession(selectedDevice_.backend);
+    if (!captureSession_) {
+        QMessageBox::warning(this, QStringLiteral("Capture Failed"), QStringLiteral("No capture backend is available for the selected device yet."));
+        stopPlayback();
+        return;
+    }
+    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
+        if (!videoSurface_) {
+            showPlaybackState(frame);
+            return;
+        }
+        updateVideoFrame(frame);
+    });
+    connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
+        QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
+        stopPlayback();
+    });
+
+    if (!captureSession_->start(selectedDevice_, selectedFormat_)) {
+        stopPlayback();
+    }
 }
 
 void MainWindow::showConnectingState()
@@ -418,7 +508,7 @@ void MainWindow::showConnectingState()
     setCentralWidget(root);
 }
 
-void MainWindow::showPlaybackState()
+void MainWindow::showPlaybackState(const QImage &firstFrame)
 {
     auto *root = new QWidget(this);
     root->setStyleSheet(QStringLiteral("background-color: black;"));
@@ -427,7 +517,14 @@ void MainWindow::showPlaybackState()
 
     auto *layout = new QVBoxLayout(root);
     layout->setContentsMargins(24, 24, 24, 32);
-    layout->addStretch();
+
+    auto *video = new QLabel(root);
+    video->setAlignment(Qt::AlignCenter);
+    video->setStyleSheet(QStringLiteral("background-color: black; color: #808080; font-size: 24px;"));
+    video->setText(QStringLiteral("Waiting for video frame..."));
+    video->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    layout->addWidget(video, 1);
+    videoSurface_ = video;
 
     auto *controls = new QFrame(root);
     controls->setFixedHeight(58);
@@ -476,12 +573,33 @@ void MainWindow::showPlaybackState()
     layout->addWidget(controls, 0, Qt::AlignHCenter | Qt::AlignBottom);
     playbackControls_ = controls;
     setCentralWidget(root);
+    if (!firstFrame.isNull()) {
+        updateVideoFrame(firstFrame);
+    }
     showPlaybackControls();
     resetPlaybackControlsTimer();
 }
 
+void MainWindow::updateVideoFrame(const QImage &frame)
+{
+    if (!videoSurface_ || frame.isNull()) {
+        return;
+    }
+
+    const auto scaled = QPixmap::fromImage(frame).scaled(
+        videoSurface_->size(),
+        Qt::KeepAspectRatio,
+        Qt::SmoothTransformation);
+    videoSurface_->setPixmap(scaled);
+}
+
 void MainWindow::stopPlayback()
 {
+    if (captureSession_) {
+        captureSession_->stop();
+        captureSession_.reset();
+    }
+    videoSurface_.clear();
     buildStoppedState();
 }
 

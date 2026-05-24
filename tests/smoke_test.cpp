@@ -1,5 +1,6 @@
 #include "AppMetadata.h"
 #include "app/BuildInfo.h"
+#include "platform/linux/V4L2DeviceDiscovery.h"
 #include "settings/AppSettings.h"
 
 #include <QCoreApplication>
@@ -23,6 +24,13 @@ int main(int argc, char *argv[])
     assert(settings.volumePercent() == 100);
     settings.setVolumePercent(-10);
     assert(settings.volumePercent() == 0);
+
+    const auto devices = consolation::platform::linux::V4L2DeviceDiscovery().enumerateDevices();
+    for (const auto &device : devices) {
+        assert(!device.devicePath.isEmpty());
+        assert(!device.displayName.isEmpty());
+        assert(!device.formats.empty());
+    }
 
     return 0;
 }

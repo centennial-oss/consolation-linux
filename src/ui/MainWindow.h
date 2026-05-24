@@ -1,9 +1,15 @@
 #pragma once
 
+#include "capture/CaptureSession.h"
+#include "capture/CaptureTypes.h"
 #include "settings/AppSettings.h"
 
+#include <QImage>
 #include <QMainWindow>
 #include <QPointer>
+
+#include <memory>
+#include <vector>
 
 class QFrame;
 class QLabel;
@@ -20,9 +26,10 @@ protected:
 
 private:
     void buildStoppedState();
-    void startMockPlayback();
+    void startPlayback();
     void showConnectingState();
-    void showPlaybackState();
+    void showPlaybackState(const QImage &firstFrame = {});
+    void updateVideoFrame(const QImage &frame);
     void stopPlayback();
     void showPlaybackControls();
     void hidePlaybackControls();
@@ -32,8 +39,13 @@ private:
     void showAboutDialog();
 
     settings::AppSettings settings_;
+    std::vector<capture::CaptureDevice> devices_;
+    capture::CaptureDevice selectedDevice_;
+    capture::CaptureFormat selectedFormat_;
+    QPointer<QLabel> videoSurface_;
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
+    std::unique_ptr<capture::CaptureSession> captureSession_;
 };
 
 } // namespace consolation::ui
