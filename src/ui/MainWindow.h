@@ -33,6 +33,8 @@ private:
     void showPlaybackState(const QImage &firstFrame = {});
     void updateVideoFrame(const QImage &frame);
     void stopPlayback();
+    void stopPlaybackAsync();
+    void preconfigureSelectedFormat(bool force = false);
     void showPlaybackControls();
     void hidePlaybackControls();
     void resetPlaybackControlsTimer();
@@ -44,6 +46,7 @@ private:
     std::vector<capture::CaptureDevice> devices_;
     capture::CaptureDevice selectedDevice_;
     capture::CaptureFormat selectedFormat_;
+    QString preconfiguredFormatKey_;
     QPointer<QLabel> videoSurface_;
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;

@@ -36,9 +36,15 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cerrno>
 #include <cmath>
+#include <cstring>
+#include <fcntl.h>
 #include <iostream>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
 #include <utility>
+#include <unistd.h>
 #include <vector>
 
 namespace consolation::ui {
@@ -53,6 +59,24 @@ void logCaptureStartup(const char *stage, const QString &detail = {})
     }
     std::cout << std::endl;
     std::cout.flush();
+}
+
+int xioctl(const int fd, const unsigned long request, void *arg)
+{
+    int result = 0;
+    do {
+        result = ::ioctl(fd, request, arg);
+    } while (result == -1 && errno == EINTR);
+    return result;
+}
+
+quint32 stringToFourCc(const QString &value)
+{
+    const auto latin = value.toLatin1();
+    if (latin.size() < 4) {
+        return 0;
+    }
+    return v4l2_fourcc(latin[0], latin[1], latin[2], latin[3]);
 }
 
 constexpr auto accentColor = "#CC11BB";
@@ -450,10 +474,12 @@ void MainWindow::buildStoppedState()
             return;
         }
         selectedFormat_ = selectedDevice_.formats[formatIndex];
+        QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(); });
     };
     connect(deviceCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
     connect(formatCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
     updateSelection();
+    QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(true); });
     panelLayout->addWidget(playButton, 0, Qt::AlignCenter);
 
     rootLayout->addWidget(panel, 0, Qt::AlignHCenter);
@@ -546,12 +572,6 @@ void MainWindow::startPlayback()
     logCaptureStartup("session moved to capture thread");
 
     connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
-        logCaptureStartup(
-            "frameReady",
-            QStringLiteral("%1x%2 firstSurface=%3")
-                .arg(frame.width())
-                .arg(frame.height())
-                .arg(videoSurface_ == nullptr ? QStringLiteral("yes") : QStringLiteral("no")));
         if (!videoSurface_) {
             showPlaybackState(frame);
             return;
@@ -666,7 +686,7 @@ void MainWindow::showPlaybackState(const QImage &firstFrame)
     auto *zoomSlider = makePlaybackSlider(controls);
     zoomSlider->setValue(0);
 
-    connect(powerButton, &QPushButton::clicked, this, [this]() { stopPlayback(); });
+    connect(powerButton, &QPushButton::clicked, this, [this]() { stopPlaybackAsync(); });
     connect(settingsButton, &QPushButton::clicked, this, [this]() { showSettingsDialog(); });
     connect(volumeSlider, &QSlider::valueChanged, this, [this](const int value) {
         settings_.setVolumePercent(value);
@@ -707,6 +727,67 @@ void MainWindow::updateVideoFrame(const QImage &frame)
     videoSurface_->setPixmap(scaled);
 }
 
+void MainWindow::preconfigureSelectedFormat(const bool force)
+{
+    if (selectedDevice_.backend != capture::CaptureBackend::V4L2 ||
+        selectedDevice_.devicePath.isEmpty() ||
+        selectedFormat_.width <= 0 ||
+        selectedFormat_.height <= 0 ||
+        selectedFormat_.pixelFormat.isEmpty()) {
+        return;
+    }
+
+    const auto key = QStringLiteral("%1|%2x%3|%4|%5")
+                         .arg(selectedDevice_.devicePath)
+                         .arg(selectedFormat_.width)
+                         .arg(selectedFormat_.height)
+                         .arg(selectedFormat_.pixelFormat)
+                         .arg(selectedFormat_.framesPerSecond, 0, 'f', 2);
+    if (!force && preconfiguredFormatKey_ == key) {
+        return;
+    }
+    preconfiguredFormatKey_ = key;
+
+    const auto requestedPixelFormat = stringToFourCc(selectedFormat_.pixelFormat);
+    if (requestedPixelFormat == 0) {
+        return;
+    }
+
+    logCaptureStartup("preconfiguring selected capture format", selectedFormat_.label);
+    const int fd = ::open(selectedDevice_.devicePath.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        logCaptureStartup("preconfigure open failed", QString::fromLocal8Bit(std::strerror(errno)));
+        return;
+    }
+
+    v4l2_format current {};
+    current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(fd, VIDIOC_G_FMT, &current) != 0) {
+        logCaptureStartup("preconfigure G_FMT failed", QString::fromLocal8Bit(std::strerror(errno)));
+        ::close(fd);
+        return;
+    }
+
+    const auto alreadySelected =
+        static_cast<int>(current.fmt.pix.width) == selectedFormat_.width &&
+        static_cast<int>(current.fmt.pix.height) == selectedFormat_.height &&
+        current.fmt.pix.pixelformat == requestedPixelFormat;
+    if (!alreadySelected) {
+        current.fmt.pix.width = static_cast<__u32>(selectedFormat_.width);
+        current.fmt.pix.height = static_cast<__u32>(selectedFormat_.height);
+        current.fmt.pix.pixelformat = requestedPixelFormat;
+        if (xioctl(fd, VIDIOC_S_FMT, &current) != 0) {
+            logCaptureStartup("preconfigure S_FMT failed", QString::fromLocal8Bit(std::strerror(errno)));
+        } else {
+            logCaptureStartup("preconfigure S_FMT applied; device may reset before Play");
+        }
+    } else {
+        logCaptureStartup("preconfigure skipped; selected format already active");
+    }
+
+    ::close(fd);
+}
+
 void MainWindow::stopPlayback()
 {
     if (captureSession_) {
@@ -726,6 +807,44 @@ void MainWindow::stopPlayback()
     }
     videoSurface_.clear();
     buildStoppedState();
+}
+
+void MainWindow::stopPlaybackAsync()
+{
+    auto *session = captureSession_.release();
+    auto *thread = captureThread_;
+    captureThread_ = nullptr;
+
+    videoSurface_.clear();
+    buildStoppedState();
+
+    if (session == nullptr) {
+        if (thread != nullptr) {
+            thread->quit();
+            thread->deleteLater();
+        }
+        return;
+    }
+
+    QObject::disconnect(session, nullptr, this, nullptr);
+    if (thread != nullptr && thread->isRunning()) {
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        QMetaObject::invokeMethod(
+            session,
+            [session, thread]() {
+                session->stop();
+                session->deleteLater();
+                thread->quit();
+            },
+            Qt::QueuedConnection);
+        return;
+    }
+
+    session->stop();
+    delete session;
+    if (thread != nullptr) {
+        delete thread;
+    }
 }
 
 void MainWindow::showPlaybackControls()
