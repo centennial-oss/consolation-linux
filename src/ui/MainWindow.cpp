@@ -30,17 +30,30 @@
 #include <QStyle>
 #include <QStringList>
 #include <QTextEdit>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cmath>
+#include <iostream>
 #include <utility>
 #include <vector>
 
 namespace consolation::ui {
 
 namespace {
+
+void logCaptureStartup(const char *stage, const QString &detail = {})
+{
+    std::cout << "[MainWindow capture] " << stage;
+    if (!detail.isEmpty()) {
+        std::cout << ": " << detail.toStdString();
+    }
+    std::cout << std::endl;
+    std::cout.flush();
+}
 
 constexpr auto accentColor = "#CC11BB";
 constexpr auto panelStyle = R"(
@@ -279,6 +292,19 @@ MainWindow::MainWindow(QWidget *parent)
     connect(controlsHideTimer_, &QTimer::timeout, this, [this]() { hidePlaybackControls(); });
 }
 
+MainWindow::~MainWindow()
+{
+    if (captureSession_ && captureThread_ && captureThread_->isRunning()) {
+        QMetaObject::invokeMethod(
+            captureSession_.get(), &capture::CaptureSession::stop, Qt::BlockingQueuedConnection);
+    }
+    if (captureThread_) {
+        captureThread_->quit();
+        captureThread_->wait();
+        delete captureThread_;
+    }
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == centralWidget() && playbackControls_ && event->type() == QEvent::MouseMove) {
@@ -353,8 +379,20 @@ void MainWindow::buildStoppedState()
             return;
         }
         const auto &device = devices_[deviceIndex];
+        auto preferredFormatComboIndex = -1;
         for (auto formatIndex = 0; formatIndex < static_cast<int>(device.formats.size()); ++formatIndex) {
-            formatCombo->addItem(device.formats[formatIndex].label, formatIndex);
+            const auto &format = device.formats[formatIndex];
+            formatCombo->addItem(format.label, formatIndex);
+            if (preferredFormatComboIndex < 0 &&
+                format.width == 1920 &&
+                format.height == 1080 &&
+                std::abs(format.framesPerSecond - 60.0) <= 0.5 &&
+                (format.pixelFormat == QStringLiteral("YUYV") || format.pixelFormat == QStringLiteral("YUY2"))) {
+                preferredFormatComboIndex = formatCombo->count() - 1;
+            }
+        }
+        if (preferredFormatComboIndex >= 0) {
+            formatCombo->setCurrentIndex(preferredFormatComboIndex);
         }
     };
     refreshFormats();
@@ -460,117 +498,107 @@ void MainWindow::startPlayback()
         return;
     }
 
-    const auto selectedStableId = selectedDevice_.stableId;
-    const auto selectedV4l2Path = selectedDevice_.v4l2DevicePath.isEmpty()
-        ? selectedDevice_.devicePath
-        : selectedDevice_.v4l2DevicePath;
-    const auto selectedDisplayName = selectedDevice_.displayName;
-    const auto selectedFormatLabel = selectedFormat_.label;
-
-    devices_ = capture::CaptureBackendManager().enumerateDevices();
-    auto refreshedDeviceIndex = -1;
-    for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
-        const auto &device = devices_[static_cast<size_t>(index)];
-        if (!selectedStableId.isEmpty() && device.stableId == selectedStableId) {
-            refreshedDeviceIndex = index;
-            break;
+    // OBS tears down the active V4L2 source before opening/configuring it again.
+    // Do the same here before opening the selected device for the new session.
+    if (captureSession_) {
+        if (captureThread_ && captureThread_->isRunning()) {
+            QMetaObject::invokeMethod(
+                captureSession_.get(), &capture::CaptureSession::stop, Qt::BlockingQueuedConnection);
+        } else {
+            captureSession_->stop();
         }
-        if (!selectedV4l2Path.isEmpty() &&
-            (device.v4l2DevicePath == selectedV4l2Path || device.devicePath == selectedV4l2Path)) {
-            refreshedDeviceIndex = index;
-            break;
-        }
-        if (!selectedDisplayName.isEmpty() && device.displayName == selectedDisplayName) {
-            refreshedDeviceIndex = index;
-        }
+        captureSession_.reset();
+    }
+    if (captureThread_) {
+        captureThread_->quit();
+        captureThread_->wait();
+        delete captureThread_;
+        captureThread_ = nullptr;
     }
 
-    if (refreshedDeviceIndex < 0) {
+    if (selectedDevice_.devicePath.isEmpty()) {
         QMessageBox::warning(
             this,
             QStringLiteral("Capture Failed"),
-            QStringLiteral(
-                "The selected capture device is no longer available. It may still be reconnecting after a USB reset."));
+            QStringLiteral("No capture device is selected."));
         stopPlayback();
         return;
     }
 
-    selectedDevice_ = devices_[static_cast<size_t>(refreshedDeviceIndex)];
-    auto refreshedFormatIndex = 0;
-    for (auto index = 0; index < static_cast<int>(selectedDevice_.formats.size()); ++index) {
-        if (selectedDevice_.formats[static_cast<size_t>(index)].label == selectedFormatLabel) {
-            refreshedFormatIndex = index;
-            break;
-        }
-    }
-    selectedFormat_ = selectedDevice_.formats[static_cast<size_t>(refreshedFormatIndex)];
-
-    const auto beginCapture = [&]() -> bool {
-        if (captureSession_) {
-            captureSession_->stop();
-            captureSession_.reset();
-        }
-
-        captureSession_ = capture::CaptureBackendManager().createSession(selectedDevice_.backend);
-        if (!captureSession_) {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("Capture Failed"),
-                QStringLiteral("No capture backend is available for the selected device yet."));
-            return false;
-        }
-
-        QString startupError;
-        const auto startupFailureConnection = connect(
-            captureSession_.get(),
-            &capture::CaptureSession::failed,
+    captureSession_ = capture::CaptureBackendManager().createSession(selectedDevice_.backend);
+    if (!captureSession_) {
+        QMessageBox::warning(
             this,
-            [&startupError](const QString &message) {
-                startupError = message;
-            });
-
-        const auto started = captureSession_->start(selectedDevice_, selectedFormat_);
-        disconnect(startupFailureConnection);
-        if (!started) {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("Capture Failed"),
-                startupError.isEmpty() ? QStringLiteral("Could not start capture.") : startupError);
-            captureSession_->stop();
-            captureSession_.reset();
-            return false;
-        }
-
-        connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
-            if (!videoSurface_) {
-                showPlaybackState(frame);
-                return;
-            }
-            updateVideoFrame(frame);
-        });
-        connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
-            QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
-            stopPlayback();
-        });
-
-        return true;
-    };
-
-    if (beginCapture()) {
-        auto *session = captureSession_.get();
-        QTimer::singleShot(10000, this, [this, session]() {
-            if (captureSession_.get() == session && !videoSurface_) {
-                QMessageBox::warning(
-                    this,
-                    QStringLiteral("Capture Failed"),
-                    QStringLiteral("Timed out waiting for capture frames."));
-                stopPlayback();
-            }
-        });
+            QStringLiteral("Capture Failed"),
+            QStringLiteral("No capture backend is available for the selected device yet."));
+        stopPlayback();
         return;
     }
 
-    stopPlayback();
+    // Move the session to a dedicated thread so the blocking USB-reset recovery in start()
+    // doesn't freeze the UI event loop. Signals from the session to main-thread slots are
+    // automatically delivered as queued connections across the thread boundary.
+    logCaptureStartup(
+        "creating capture thread",
+        QStringLiteral("%1 @ %2").arg(selectedDevice_.displayName, selectedFormat_.label));
+    captureThread_ = new QThread();
+    captureSession_->moveToThread(captureThread_);
+    logCaptureStartup("session moved to capture thread");
+
+    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
+        logCaptureStartup(
+            "frameReady",
+            QStringLiteral("%1x%2 firstSurface=%3")
+                .arg(frame.width())
+                .arg(frame.height())
+                .arg(videoSurface_ == nullptr ? QStringLiteral("yes") : QStringLiteral("no")));
+        if (!videoSurface_) {
+            showPlaybackState(frame);
+            return;
+        }
+        updateVideoFrame(frame);
+    });
+    connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
+        logCaptureStartup("failed", message);
+        QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
+        stopPlayback();
+    });
+    connect(captureSession_.get(), &capture::CaptureSession::logMessage, this, [](const QString &message) {
+        logCaptureStartup("session", message);
+    });
+
+    const auto deviceSnapshot = selectedDevice_;
+    const auto formatSnapshot = selectedFormat_;
+    logCaptureStartup(
+        "queuing CaptureSession::start",
+        QStringLiteral("%1 (%2)").arg(deviceSnapshot.devicePath, formatSnapshot.label));
+    QMetaObject::invokeMethod(
+        captureSession_.get(),
+        [this, deviceSnapshot, formatSnapshot]() {
+            logCaptureStartup(
+                "CaptureSession::start on worker thread",
+                QStringLiteral("thread=%1").arg(
+                    QString::number(reinterpret_cast<quintptr>(QThread::currentThreadId()), 16)));
+            const auto started = captureSession_->start(deviceSnapshot, formatSnapshot);
+            logCaptureStartup("CaptureSession::start finished", started ? QStringLiteral("ok") : QStringLiteral("failed"));
+        },
+        Qt::QueuedConnection);
+
+    captureThread_->start();
+    logCaptureStartup("capture thread started");
+
+    auto *sessionPtr = captureSession_.get();
+    QTimer::singleShot(10000, this, [this, sessionPtr]() {
+        if (captureSession_.get() == sessionPtr && !videoSurface_) {
+            logCaptureStartup("timed out waiting for first frame");
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Capture Failed"),
+                QStringLiteral("Timed out waiting for capture frames."));
+            stopPlayback();
+        }
+    });
+    logCaptureStartup("started 10s first-frame timeout");
 }
 
 void MainWindow::showConnectingState()
@@ -675,15 +703,26 @@ void MainWindow::updateVideoFrame(const QImage &frame)
     const auto scaled = QPixmap::fromImage(frame).scaled(
         videoSurface_->size(),
         Qt::KeepAspectRatio,
-        Qt::SmoothTransformation);
+        Qt::FastTransformation);
     videoSurface_->setPixmap(scaled);
 }
 
 void MainWindow::stopPlayback()
 {
     if (captureSession_) {
-        captureSession_->stop();
+        if (captureThread_ && captureThread_->isRunning()) {
+            QMetaObject::invokeMethod(
+                captureSession_.get(), &capture::CaptureSession::stop, Qt::BlockingQueuedConnection);
+        } else {
+            captureSession_->stop();
+        }
         captureSession_.reset();
+    }
+    if (captureThread_) {
+        captureThread_->quit();
+        captureThread_->wait();
+        delete captureThread_;
+        captureThread_ = nullptr;
     }
     videoSurface_.clear();
     buildStoppedState();

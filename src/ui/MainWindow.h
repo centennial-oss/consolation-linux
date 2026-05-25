@@ -13,6 +13,7 @@
 
 class QFrame;
 class QLabel;
+class QThread;
 class QTimer;
 
 namespace consolation::ui {
@@ -20,6 +21,7 @@ namespace consolation::ui {
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -46,6 +48,7 @@ private:
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
     std::unique_ptr<capture::CaptureSession> captureSession_;
+    QThread *captureThread_ = nullptr;
 };
 
 } // namespace consolation::ui

@@ -52,11 +52,7 @@ target_link_libraries(consolation_core
     PUBLIC
         Qt6::Core
         Qt6::Gui
-    PRIVATE
-        ${LIBV4L2_LIBRARY}
 )
-
-target_include_directories(consolation_core PRIVATE ${LIBV4L2_INCLUDE_DIR})
 
 add_executable(consolation
     src/app/main.cpp

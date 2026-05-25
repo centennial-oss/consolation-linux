@@ -4,14 +4,14 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cmath>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
-#include <libv4l2.h>
 #include <linux/videodev2.h>
 #include <numeric>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 
 namespace consolation::platform::linux {
@@ -22,7 +22,7 @@ int xioctl(const int fd, const unsigned long request, void *arg)
 {
     int result = 0;
     do {
-        result = v4l2_ioctl(fd, request, arg);
+        result = ::ioctl(fd, request, arg);
     } while (result == -1 && errno == EINTR);
     return result;
 }
@@ -101,21 +101,50 @@ bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const captu
 {
     stop();
 
-    if (!configureDevice(device, format) || !allocateBuffers() || !queueBuffers()) {
-        stop();
-        return false;
+    constexpr int maxAttempts = 3;
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        if (attempt > 1) {
+            emit logMessage(QStringLiteral("V4L2 retrying stream startup after reset/EBUSY (attempt %1 of %2)")
+                                .arg(attempt)
+                                .arg(maxAttempts));
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        }
+
+        if (!configureDevice(device, format) || !allocateBuffers() || !queueBuffers()) {
+            const auto failureErrno = errno;
+            cleanupBuffers();
+            closeDevice();
+            if (attempt < maxAttempts && (failureErrno == EBUSY || failureErrno == ENODEV || failureErrno == ENOENT)) {
+                continue;
+            }
+            stop();
+            return false;
+        }
+
+        emit logMessage(QStringLiteral("V4L2 starting stream with VIDIOC_STREAMON"));
+        v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(fd_, VIDIOC_STREAMON, &type) == 0) {
+            streaming_ = true;
+            notifier_ = new QSocketNotifier(fd_, QSocketNotifier::Read, this);
+            connect(notifier_, &QSocketNotifier::activated, this, [this]() { handleReadyRead(); });
+            return true;
+        }
+
+        const auto streamErrno = errno;
+        emit logMessage(QStringLiteral("V4L2 STREAMON failed on attempt %1: %2")
+                            .arg(attempt)
+                            .arg(QString::fromLocal8Bit(std::strerror(streamErrno))));
+        cleanupBuffers();
+        closeDevice();
+
+        if (attempt >= maxAttempts || (streamErrno != EBUSY && streamErrno != ENODEV && streamErrno != ENOENT)) {
+            emit failed(QStringLiteral("Could not start capture stream: %1").arg(QString::fromLocal8Bit(std::strerror(streamErrno))));
+            return false;
+        }
     }
 
-    v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(fd_, VIDIOC_STREAMON, &type) != 0) {
-        emit failed(QStringLiteral("Could not start capture stream: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
-        stop();
-        return false;
-    }
-
-    notifier_ = new QSocketNotifier(fd_, QSocketNotifier::Read, this);
-    connect(notifier_, &QSocketNotifier::activated, this, [this]() { handleReadyRead(); });
-    return true;
+    emit failed(QStringLiteral("Could not start capture stream after retrying device reset."));
+    return false;
 }
 
 void V4L2CaptureSession::stop()
@@ -126,9 +155,10 @@ void V4L2CaptureSession::stop()
         notifier_ = nullptr;
     }
 
-    if (fd_ >= 0) {
+    if (fd_ >= 0 && streaming_) {
         v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(fd_, VIDIOC_STREAMOFF, &type);
+        streaming_ = false;
     }
 
     cleanupBuffers();
@@ -137,18 +167,10 @@ void V4L2CaptureSession::stop()
 
 bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format)
 {
-    fd_ = v4l2_open(device.devicePath.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    fd_ = ::open(device.devicePath.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd_ < 0) {
         emit failed(QStringLiteral("Could not open %1: %2").arg(device.devicePath, QString::fromLocal8Bit(std::strerror(errno))));
         return false;
-    }
-
-    int input = 0;
-    if (xioctl(fd_, VIDIOC_S_INPUT, &input) != 0) {
-        emit logMessage(QStringLiteral("V4L2 input 0 selection returned %1; continuing with current input")
-                            .arg(QString::fromLocal8Bit(std::strerror(errno))));
-    } else {
-        emit logMessage(QStringLiteral("V4L2 selected input 0"));
     }
 
     const auto requestedPixelFormat = stringToFourCc(format.pixelFormat);
@@ -157,9 +179,9 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
         return false;
     }
 
-    v4l2_format requested {};
-    requested.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(fd_, VIDIOC_G_FMT, &requested) != 0) {
+    v4l2_format current {};
+    current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(fd_, VIDIOC_G_FMT, &current) != 0) {
         emit failed(QStringLiteral("Could not read current capture format before configuring %1: %2").arg(
             device.devicePath,
             QString::fromLocal8Bit(std::strerror(errno))));
@@ -171,93 +193,110 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
                         .arg(format.height)
                         .arg(format.pixelFormat)
                         .arg(format.framesPerSecond, 0, 'f', 2));
-
-    const auto currentWidth = static_cast<int>(requested.fmt.pix.width);
-    const auto currentHeight = static_cast<int>(requested.fmt.pix.height);
-    const auto currentPixelFormat = requested.fmt.pix.pixelformat;
     const auto formatAlreadySelected =
-        currentWidth == format.width &&
-        currentHeight == format.height &&
-        currentPixelFormat == requestedPixelFormat;
-
+        static_cast<int>(current.fmt.pix.width) == format.width &&
+        static_cast<int>(current.fmt.pix.height) == format.height &&
+        current.fmt.pix.pixelformat == requestedPixelFormat;
     if (formatAlreadySelected) {
-        emit logMessage(QStringLiteral("V4L2 format already selected; skipping VIDIOC_S_FMT"));
+        emit logMessage(QStringLiteral("V4L2 selected format already active; skipping VIDIOC_TRY_FMT and VIDIOC_S_FMT"));
     } else {
+        v4l2_format requested = current;
         requested.fmt.pix.width = static_cast<__u32>(format.width);
         requested.fmt.pix.height = static_cast<__u32>(format.height);
         requested.fmt.pix.pixelformat = requestedPixelFormat;
 
+        v4l2_format trial = requested;
+        if (xioctl(fd_, VIDIOC_TRY_FMT, &trial) != 0) {
+            emit failed(QStringLiteral("Could not validate capture format %1: %2").arg(
+                format.label, QString::fromLocal8Bit(std::strerror(errno))));
+            return false;
+        }
+
+        const auto trialMatches =
+            static_cast<int>(trial.fmt.pix.width) == format.width &&
+            static_cast<int>(trial.fmt.pix.height) == format.height &&
+            trial.fmt.pix.pixelformat == requestedPixelFormat;
+        if (!trialMatches) {
+            emit failed(QStringLiteral("Capture device would negotiate %1x%2 %3 instead of requested %4; not applying format change.")
+                            .arg(static_cast<int>(trial.fmt.pix.width))
+                            .arg(static_cast<int>(trial.fmt.pix.height))
+                            .arg(fourCcToString(trial.fmt.pix.pixelformat), format.label));
+            return false;
+        }
+
+        emit logMessage(QStringLiteral("V4L2 applying selected format with VIDIOC_S_FMT"));
         if (xioctl(fd_, VIDIOC_S_FMT, &requested) != 0) {
             emit failed(QStringLiteral("Could not set capture format %1: %2").arg(
-                format.label,
-                QString::fromLocal8Bit(std::strerror(errno))));
+                format.label, QString::fromLocal8Bit(std::strerror(errno))));
+            return false;
+        }
+
+        emit logMessage(QStringLiteral("V4L2 format change applied; reopening device before buffer allocation"));
+        closeDevice();
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        fd_ = ::open(device.devicePath.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (fd_ < 0) {
+            emit failed(QStringLiteral("Could not reopen %1 after format change: %2").arg(
+                device.devicePath, QString::fromLocal8Bit(std::strerror(errno))));
+            return false;
+        }
+
+        current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(fd_, VIDIOC_G_FMT, &current) != 0) {
+            emit failed(QStringLiteral("Could not read capture format after setting %1: %2").arg(
+                format.label, QString::fromLocal8Bit(std::strerror(errno))));
             return false;
         }
     }
 
-    v4l2_streamparm requestedParm {};
-    requestedParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(fd_, VIDIOC_G_PARM, &requestedParm) != 0) {
-        emit failed(QStringLiteral("Could not read current capture frame rate: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
-        return false;
-    }
-    const auto requestedTimePerFrame = fpsToTimePerFrame(format.framesPerSecond);
-    const auto currentFpsBeforeSet = timePerFrameToFps(requestedParm.parm.capture.timeperframe);
-    const auto frameRateAlreadySelected =
-        format.framesPerSecond > 0.0 &&
-        std::abs(currentFpsBeforeSet - format.framesPerSecond) <= 0.5;
-    if (frameRateAlreadySelected) {
-        emit logMessage(QStringLiteral("V4L2 frame rate already selected; skipping VIDIOC_S_PARM"));
-    } else if (formatAlreadySelected) {
-        emit logMessage(QStringLiteral("V4L2 format is already selected; preserving current frame rate %1 fps to avoid reconfiguring active hardware")
-                            .arg(currentFpsBeforeSet, 0, 'f', 2));
-    } else if (requestedTimePerFrame.numerator != 0) {
-        requestedParm.parm.capture.timeperframe = requestedTimePerFrame;
-        if (xioctl(fd_, VIDIOC_S_PARM, &requestedParm) != 0) {
-            emit failed(QStringLiteral("Could not set capture frame rate %1 fps: %2").arg(
-                QString::number(format.framesPerSecond, 'f', 2),
-                QString::fromLocal8Bit(std::strerror(errno))));
-            return false;
+    v4l2_streamparm parm {};
+    parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(fd_, VIDIOC_G_PARM, &parm) == 0) {
+        const auto requestedTimePerFrame = fpsToTimePerFrame(format.framesPerSecond);
+        const auto currentFps = timePerFrameToFps(parm.parm.capture.timeperframe);
+        if (requestedTimePerFrame.numerator != 0 && std::abs(currentFps - format.framesPerSecond) > 0.5) {
+            parm.parm.capture.timeperframe = requestedTimePerFrame;
+            emit logMessage(QStringLiteral("V4L2 applying selected frame rate with VIDIOC_S_PARM"));
+            if (xioctl(fd_, VIDIOC_S_PARM, &parm) != 0) {
+                emit failed(QStringLiteral("Could not set capture frame rate %1 fps: %2").arg(
+                    QString::number(format.framesPerSecond, 'f', 2),
+                    QString::fromLocal8Bit(std::strerror(errno))));
+                return false;
+            }
         }
     }
-
-    v4l2_format current {};
-    current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(fd_, VIDIOC_G_FMT, &current) != 0) {
-        emit failed(QStringLiteral("Could not read current capture format: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
-        return false;
-    }
-
-    v4l2_streamparm currentParm {};
-    currentParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    const auto hasCurrentFps = xioctl(fd_, VIDIOC_G_PARM, &currentParm) == 0;
-    const auto acceptedFps = hasCurrentFps ? timePerFrameToFps(currentParm.parm.capture.timeperframe) : 0.0;
 
     width_ = static_cast<int>(current.fmt.pix.width);
     height_ = static_cast<int>(current.fmt.pix.height);
+    bytesPerLine_ = static_cast<int>(current.fmt.pix.bytesperline);
     pixelFormat_ = current.fmt.pix.pixelformat;
 
-    emit logMessage(QStringLiteral("V4L2 accepted format %1x%2 %3%4")
+    emit logMessage(QStringLiteral("V4L2 current format %1x%2 %3 stride=%4")
                         .arg(width_)
                         .arg(height_)
                         .arg(fourCcToString(pixelFormat_))
-                        .arg(hasCurrentFps
-                                 ? QStringLiteral(" @ %1 fps").arg(acceptedFps, 0, 'f', 2)
-                                 : QString()));
+                        .arg(bytesPerLine_));
 
-    if (width_ != format.width || height_ != format.height || pixelFormat_ != requestedPixelFormat) {
-        emit failed(QStringLiteral("Capture device accepted %1x%2 %3 instead of requested %4.").arg(
-            QString::number(width_),
-            QString::number(height_),
-            fourCcToString(pixelFormat_),
-            format.label));
+    if (width_ <= 0 || height_ <= 0) {
+        emit failed(QStringLiteral("Capture device reported invalid format after negotiation: %1x%2").arg(width_).arg(height_));
         return false;
     }
-    if (!formatAlreadySelected && hasCurrentFps && format.framesPerSecond > 0.0 && std::abs(acceptedFps - format.framesPerSecond) > 0.5) {
-        emit failed(QStringLiteral("Capture device accepted %1 fps instead of requested %2 fps.").arg(
-            QString::number(acceptedFps, 'f', 2),
-            QString::number(format.framesPerSecond, 'f', 2)));
-        return false;
+    if (bytesPerLine_ <= 0) {
+        if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
+            bytesPerLine_ = width_ * 2;
+        } else if (pixelFormat_ == V4L2_PIX_FMT_RGB24 || pixelFormat_ == V4L2_PIX_FMT_BGR24) {
+            bytesPerLine_ = width_ * 3;
+        } else {
+            bytesPerLine_ = width_;
+        }
+    }
+    if (width_ != format.width || height_ != format.height) {
+        emit logMessage(QStringLiteral("V4L2 note: device negotiated %1x%2 (requested %3x%4)")
+                            .arg(width_).arg(height_).arg(format.width).arg(format.height));
+    }
+    if (pixelFormat_ != requestedPixelFormat) {
+        emit logMessage(QStringLiteral("V4L2 note: device negotiated pixel format %1 (requested %2)")
+                            .arg(fourCcToString(pixelFormat_), format.pixelFormat));
     }
 
     return true;
@@ -265,6 +304,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
 
 bool V4L2CaptureSession::allocateBuffers()
 {
+    emit logMessage(QStringLiteral("V4L2 requesting mmap capture buffers"));
     v4l2_requestbuffers request {};
     request.count = 4;
     request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -288,7 +328,7 @@ bool V4L2CaptureSession::allocateBuffers()
         }
 
         buffers_[index].length = buffer.length;
-        buffers_[index].start = v4l2_mmap(nullptr, buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, buffer.m.offset);
+        buffers_[index].start = ::mmap(nullptr, buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, buffer.m.offset);
         if (buffers_[index].start == MAP_FAILED) {
             buffers_[index].start = nullptr;
             emit failed(QStringLiteral("Could not map capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
@@ -301,6 +341,7 @@ bool V4L2CaptureSession::allocateBuffers()
 
 bool V4L2CaptureSession::queueBuffers()
 {
+    emit logMessage(QStringLiteral("V4L2 queueing capture buffers"));
     for (auto index = 0U; index < buffers_.size(); ++index) {
         v4l2_buffer buffer {};
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -339,6 +380,9 @@ void V4L2CaptureSession::handleReadyRead()
             }
         }
 
+        if (fd_ < 0) {
+            return; // stop() was called from within a frameReady handler; not an error
+        }
         if (xioctl(fd_, VIDIOC_QBUF, &buffer) != 0) {
             emit failed(QStringLiteral("Could not requeue capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
             stop();
@@ -366,11 +410,14 @@ QImage V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed) co
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_RGB24) {
-        return QImage(static_cast<const uchar *>(data), width_, height_, QImage::Format_RGB888).copy();
+        return QImage(static_cast<const uchar *>(data), width_, height_, bytesPerLine_, QImage::Format_RGB888).copy();
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_BGR24) {
-        return QImage(static_cast<const uchar *>(data), width_, height_, QImage::Format_BGR888).copy();
+        // Some capture cards (e.g. blueAVS-BA12) emit BGR24 bottom-up (Windows DIB convention).
+        // Flip vertically so the image appears right-side up.
+        return QImage(static_cast<const uchar *>(data), width_, height_, bytesPerLine_, QImage::Format_BGR888)
+            .flipped(Qt::Vertical);
     }
 
     return {};
@@ -378,14 +425,15 @@ QImage V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed) co
 
 QImage V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed) const
 {
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < width_ * height_ * 2) {
+    const auto stride = std::max(bytesPerLine_, width_ * 2);
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_) {
         return {};
     }
 
     QImage image(width_, height_, QImage::Format_RGB32);
     for (int y = 0; y < height_; ++y) {
         auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
-        const auto *source = data + y * width_ * 2;
+        const auto *source = data + y * stride;
         for (int x = 0; x < width_; x += 2) {
             const int y0 = source[0];
             const int u = source[1];
@@ -403,18 +451,19 @@ QImage V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed) co
 
 QImage V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed) const
 {
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < width_ * height_ * 3 / 2) {
+    const auto stride = std::max(bytesPerLine_, width_);
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_ * 3 / 2) {
         return {};
     }
 
     const auto *yPlane = data;
-    const auto *uvPlane = data + width_ * height_;
+    const auto *uvPlane = data + stride * height_;
     QImage image(width_, height_, QImage::Format_RGB32);
 
     for (int y = 0; y < height_; ++y) {
         auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
-        const auto *yLine = yPlane + y * width_;
-        const auto *uvLine = uvPlane + (y / 2) * width_;
+        const auto *yLine = yPlane + y * stride;
+        const auto *uvLine = uvPlane + (y / 2) * stride;
         for (int x = 0; x < width_; ++x) {
             const int uvIndex = (x / 2) * 2;
             line[x] = yuvToRgb(yLine[x], uvLine[uvIndex], uvLine[uvIndex + 1]);
@@ -428,7 +477,7 @@ void V4L2CaptureSession::cleanupBuffers()
 {
     for (auto &buffer : buffers_) {
         if (buffer.start != nullptr) {
-            v4l2_munmap(buffer.start, buffer.length);
+            ::munmap(buffer.start, buffer.length);
             buffer.start = nullptr;
             buffer.length = 0;
         }
@@ -439,7 +488,7 @@ void V4L2CaptureSession::cleanupBuffers()
 void V4L2CaptureSession::closeDevice()
 {
     if (fd_ >= 0) {
-        v4l2_close(fd_);
+        ::close(fd_);
         fd_ = -1;
     }
 }

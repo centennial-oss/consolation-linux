@@ -37,7 +37,9 @@ private:
     int fd_ = -1;
     int width_ = 0;
     int height_ = 0;
+    int bytesPerLine_ = 0;
     quint32 pixelFormat_ = 0;
+    bool streaming_ = false;
     std::vector<Buffer> buffers_;
     QSocketNotifier *notifier_ = nullptr;
 };
