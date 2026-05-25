@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <numeric>
+#include <array>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <thread>
@@ -17,6 +18,43 @@
 namespace consolation::platform::linux {
 
 namespace {
+
+constexpr size_t rgbxFramePoolSize = 6;
+constexpr qint64 telemetryWindowNs = 500'000'000;
+
+struct ChromaTables {
+    std::array<int, 256> rFromV {};
+    std::array<int, 256> gFromU {};
+    std::array<int, 256> gFromV {};
+    std::array<int, 256> bFromU {};
+    std::array<uchar, 1024> saturation {};
+};
+
+const ChromaTables &chromaTables()
+{
+    static const ChromaTables tables = [] {
+        ChromaTables result;
+        for (int value = 0; value < 256; ++value) {
+            const int delta = value - 128;
+            result.rFromV[value] = (22987 * delta) >> 14;
+            result.gFromU[value] = (-5636 * delta) >> 14;
+            result.gFromV[value] = (-11698 * delta) >> 14;
+            result.bFromU[value] = (29049 * delta) >> 14;
+        }
+        for (int value = 0; value < static_cast<int>(result.saturation.size()); ++value) {
+            result.saturation[value] = static_cast<uchar>(std::clamp(value - 256, 0, 255));
+        }
+        return result;
+    }();
+    return tables;
+}
+
+qint64 monotonicNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 int xioctl(const int fd, const unsigned long request, void *arg)
 {
@@ -69,20 +107,153 @@ double timePerFrameToFps(const v4l2_fract &timePerFrame)
     return static_cast<double>(timePerFrame.denominator) / static_cast<double>(timePerFrame.numerator);
 }
 
-int clampColor(const int value)
+uchar saturateByte(const int value)
 {
-    return std::clamp(value, 0, 255);
+    const auto &table = chromaTables().saturation;
+    return table[static_cast<size_t>(std::clamp(value + 256, 0, static_cast<int>(table.size() - 1)))];
 }
 
-QRgb yuvToRgb(const int y, const int u, const int v)
+void writeYuyvPairRgbx(const uchar *source, uchar *target)
 {
-    const int c = y - 16;
-    const int d = u - 128;
-    const int e = v - 128;
-    const int r = (298 * c + 409 * e + 128) >> 8;
-    const int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-    const int b = (298 * c + 516 * d + 128) >> 8;
-    return qRgb(clampColor(r), clampColor(g), clampColor(b));
+    const auto &tables = chromaTables();
+    const int u = source[1];
+    const int v = source[3];
+    const int r = tables.rFromV[v];
+    const int g = tables.gFromU[u] + tables.gFromV[v];
+    const int b = tables.bFromU[u];
+
+    const int y0 = source[0];
+    target[0] = saturateByte(y0 + r);
+    target[1] = saturateByte(y0 + g);
+    target[2] = saturateByte(y0 + b);
+    target[3] = 0xff;
+
+    const int y1 = source[2];
+    target[4] = saturateByte(y1 + r);
+    target[5] = saturateByte(y1 + g);
+    target[6] = saturateByte(y1 + b);
+    target[7] = 0xff;
+}
+
+void writeNv12PairRgbx(const uchar *ySource, const uchar *uvSource, uchar *target);
+
+void writeYuyv8PixelsRgbx(const uchar *source, uchar *target)
+{
+    writeYuyvPairRgbx(source, target);
+    writeYuyvPairRgbx(source + 4, target + 8);
+    writeYuyvPairRgbx(source + 8, target + 16);
+    writeYuyvPairRgbx(source + 12, target + 24);
+}
+
+void writeNv12FourPairsRgbx(const uchar *ySource, const uchar *uvSource, uchar *target)
+{
+    writeNv12PairRgbx(ySource, uvSource, target);
+    writeNv12PairRgbx(ySource + 2, uvSource + 2, target + 8);
+    writeNv12PairRgbx(ySource + 4, uvSource + 4, target + 16);
+    writeNv12PairRgbx(ySource + 6, uvSource + 6, target + 24);
+}
+
+void writeNv12PairRgbx(const uchar *ySource, const uchar *uvSource, uchar *target)
+{
+    const auto &tables = chromaTables();
+    const int u = uvSource[0];
+    const int v = uvSource[1];
+    const int r = tables.rFromV[v];
+    const int g = tables.gFromU[u] + tables.gFromV[v];
+    const int b = tables.bFromU[u];
+
+    const int y0 = ySource[0];
+    target[0] = saturateByte(y0 + r);
+    target[1] = saturateByte(y0 + g);
+    target[2] = saturateByte(y0 + b);
+    target[3] = 0xff;
+
+    const int y1 = ySource[1];
+    target[4] = saturateByte(y1 + r);
+    target[5] = saturateByte(y1 + g);
+    target[6] = saturateByte(y1 + b);
+    target[7] = 0xff;
+}
+
+void writeNv12TwoRowsRgbx(
+    const uchar *y0Source,
+    const uchar *y1Source,
+    const uchar *uvSource,
+    uchar *target0,
+    uchar *target1,
+    const int width)
+{
+    int x = 0;
+    for (; x + 8 <= width; x += 8) {
+        writeNv12FourPairsRgbx(y0Source, uvSource, target0);
+        writeNv12FourPairsRgbx(y1Source, uvSource, target1);
+        y0Source += 8;
+        y1Source += 8;
+        uvSource += 8;
+        target0 += 32;
+        target1 += 32;
+    }
+    for (; x + 2 <= width; x += 2) {
+        writeNv12PairRgbx(y0Source, uvSource, target0);
+        writeNv12PairRgbx(y1Source, uvSource, target1);
+        y0Source += 2;
+        y1Source += 2;
+        uvSource += 2;
+        target0 += 8;
+        target1 += 8;
+    }
+}
+
+void writeYuv420pPairRgbx(const uchar *ySource, const uchar *uSource, const uchar *vSource, uchar *target)
+{
+    const auto &tables = chromaTables();
+    const int u = *uSource;
+    const int v = *vSource;
+    const int r = tables.rFromV[v];
+    const int g = tables.gFromU[u] + tables.gFromV[v];
+    const int b = tables.bFromU[u];
+
+    const int y0 = ySource[0];
+    target[0] = saturateByte(y0 + r);
+    target[1] = saturateByte(y0 + g);
+    target[2] = saturateByte(y0 + b);
+    target[3] = 0xff;
+
+    const int y1 = ySource[1];
+    target[4] = saturateByte(y1 + r);
+    target[5] = saturateByte(y1 + g);
+    target[6] = saturateByte(y1 + b);
+    target[7] = 0xff;
+}
+
+void writeYuv420pTwoRowsRgbx(
+    const uchar *y0Source,
+    const uchar *y1Source,
+    const uchar *uSource,
+    const uchar *vSource,
+    uchar *target0,
+    uchar *target1,
+    const int width)
+{
+    int x = 0;
+    for (; x + 2 <= width; x += 2) {
+        writeYuv420pPairRgbx(y0Source, uSource, vSource, target0);
+        writeYuv420pPairRgbx(y1Source, uSource, vSource, target1);
+        y0Source += 2;
+        y1Source += 2;
+        ++uSource;
+        ++vSource;
+        target0 += 8;
+        target1 += 8;
+    }
+}
+
+void writeRgb24PixelRgbx(const uchar *source, uchar *target, const bool bgr)
+{
+    target[0] = source[bgr ? 2 : 0];
+    target[1] = source[1];
+    target[2] = source[bgr ? 0 : 2];
+    target[3] = 0xff;
 }
 
 } // namespace
@@ -270,6 +441,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
     height_ = static_cast<int>(current.fmt.pix.height);
     bytesPerLine_ = static_cast<int>(current.fmt.pix.bytesperline);
     pixelFormat_ = current.fmt.pix.pixelformat;
+    configuredFps_ = format.framesPerSecond;
 
     emit logMessage(QStringLiteral("V4L2 current format %1x%2 %3 stride=%4")
                         .arg(width_)
@@ -374,8 +546,11 @@ void V4L2CaptureSession::handleReadyRead()
         }
 
         if (buffer.index < buffers_.size()) {
+            const auto decodeStartNs = monotonicNs();
             const auto image = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
+            const auto decodeNs = monotonicNs() - decodeStartNs;
             if (!image.isNull()) {
+                recordDecodedFrame(static_cast<int>(buffer.bytesused), decodeNs);
                 emit frameReady(image);
             }
         }
@@ -409,15 +584,22 @@ QImage V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed) co
         return decodeNv12(static_cast<const uchar *>(data), bytesUsed);
     }
 
+    if (pixelFormat_ == V4L2_PIX_FMT_YUV420) {
+        return decodeYuv420p(static_cast<const uchar *>(data), bytesUsed, false);
+    }
+
+    if (pixelFormat_ == V4L2_PIX_FMT_YVU420) {
+        return decodeYuv420p(static_cast<const uchar *>(data), bytesUsed, true);
+    }
+
     if (pixelFormat_ == V4L2_PIX_FMT_RGB24) {
-        return QImage(static_cast<const uchar *>(data), width_, height_, bytesPerLine_, QImage::Format_RGB888).copy();
+        return decodeRgb24(static_cast<const uchar *>(data), bytesUsed, false, false);
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_BGR24) {
         // Some capture cards (e.g. blueAVS-BA12) emit BGR24 bottom-up (Windows DIB convention).
         // Flip vertically so the image appears right-side up.
-        return QImage(static_cast<const uchar *>(data), width_, height_, bytesPerLine_, QImage::Format_BGR888)
-            .flipped(Qt::Vertical);
+        return decodeRgb24(static_cast<const uchar *>(data), bytesUsed, true, true);
     }
 
     return {};
@@ -430,23 +612,51 @@ QImage V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed) co
         return {};
     }
 
-    QImage image(width_, height_, QImage::Format_RGB32);
+    QImage image = acquireRgbxFrame();
+    if (image.isNull()) {
+        return {};
+    }
     for (int y = 0; y < height_; ++y) {
-        auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+        auto *target = image.scanLine(y);
         const auto *source = data + y * stride;
-        for (int x = 0; x < width_; x += 2) {
-            const int y0 = source[0];
-            const int u = source[1];
-            const int y1 = source[2];
-            const int v = source[3];
-            line[x] = yuvToRgb(y0, u, v);
-            if (x + 1 < width_) {
-                line[x + 1] = yuvToRgb(y1, u, v);
-            }
+        int x = 0;
+        for (; x + 8 <= width_; x += 8) {
+            writeYuyv8PixelsRgbx(source, target);
+            source += 16;
+            target += 32;
+        }
+        for (; x + 2 <= width_; x += 2) {
+            writeYuyvPairRgbx(source, target);
             source += 4;
+            target += 8;
         }
     }
     return image;
+}
+
+QImage V4L2CaptureSession::acquireRgbxFrame() const
+{
+    if (rgbxFramePool_.size() != rgbxFramePoolSize) {
+        rgbxFramePool_.assign(rgbxFramePoolSize, {});
+        nextRgbxFrame_ = 0;
+    }
+
+    for (size_t attempt = 0; attempt < rgbxFramePool_.size(); ++attempt) {
+        auto &frame = rgbxFramePool_[nextRgbxFrame_];
+        nextRgbxFrame_ = (nextRgbxFrame_ + 1) % rgbxFramePool_.size();
+        if (frame.size() != QSize(width_, height_) || frame.format() != QImage::Format_RGBX8888) {
+            frame = QImage(width_, height_, QImage::Format_RGBX8888);
+            return frame;
+        }
+        if (frame.isDetached()) {
+            return frame;
+        }
+    }
+
+    auto &frame = rgbxFramePool_[nextRgbxFrame_];
+    nextRgbxFrame_ = (nextRgbxFrame_ + 1) % rgbxFramePool_.size();
+    frame = QImage(width_, height_, QImage::Format_RGBX8888);
+    return frame;
 }
 
 QImage V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed) const
@@ -458,19 +668,143 @@ QImage V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed) co
 
     const auto *yPlane = data;
     const auto *uvPlane = data + stride * height_;
-    QImage image(width_, height_, QImage::Format_RGB32);
+    QImage image(width_, height_, QImage::Format_RGBX8888);
 
-    for (int y = 0; y < height_; ++y) {
-        auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+    int y = 0;
+    for (; y + 1 < height_; y += 2) {
+        writeNv12TwoRowsRgbx(
+            yPlane + y * stride,
+            yPlane + (y + 1) * stride,
+            uvPlane + (y / 2) * stride,
+            image.scanLine(y),
+            image.scanLine(y + 1),
+            width_);
+    }
+    if (y < height_) {
         const auto *yLine = yPlane + y * stride;
         const auto *uvLine = uvPlane + (y / 2) * stride;
-        for (int x = 0; x < width_; ++x) {
-            const int uvIndex = (x / 2) * 2;
-            line[x] = yuvToRgb(yLine[x], uvLine[uvIndex], uvLine[uvIndex + 1]);
+        auto *target = image.scanLine(y);
+        for (int x = 0; x + 2 <= width_; x += 2) {
+            writeNv12PairRgbx(yLine, uvLine, target);
+            yLine += 2;
+            uvLine += 2;
+            target += 8;
         }
     }
 
     return image;
+}
+
+QImage V4L2CaptureSession::decodeYuv420p(const uchar *data, const int bytesUsed, const bool yvu) const
+{
+    const auto yStride = std::max(bytesPerLine_, width_);
+    const auto chromaStride = (yStride + 1) / 2;
+    const auto chromaHeight = (height_ + 1) / 2;
+    const auto yPlaneBytes = yStride * height_;
+    const auto chromaPlaneBytes = chromaStride * chromaHeight;
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < yPlaneBytes + chromaPlaneBytes * 2) {
+        return {};
+    }
+
+    const auto *yPlane = data;
+    const auto *firstChromaPlane = yPlane + yPlaneBytes;
+    const auto *secondChromaPlane = firstChromaPlane + chromaPlaneBytes;
+    const auto *uPlane = yvu ? secondChromaPlane : firstChromaPlane;
+    const auto *vPlane = yvu ? firstChromaPlane : secondChromaPlane;
+    QImage image(width_, height_, QImage::Format_RGBX8888);
+
+    int y = 0;
+    for (; y + 1 < height_; y += 2) {
+        writeYuv420pTwoRowsRgbx(
+            yPlane + y * yStride,
+            yPlane + (y + 1) * yStride,
+            uPlane + (y / 2) * chromaStride,
+            vPlane + (y / 2) * chromaStride,
+            image.scanLine(y),
+            image.scanLine(y + 1),
+            width_);
+    }
+    if (y < height_) {
+        const auto *yLine = yPlane + y * yStride;
+        const auto *uLine = uPlane + (y / 2) * chromaStride;
+        const auto *vLine = vPlane + (y / 2) * chromaStride;
+        auto *target = image.scanLine(y);
+        for (int x = 0; x + 2 <= width_; x += 2) {
+            writeYuv420pPairRgbx(yLine, uLine, vLine, target);
+            yLine += 2;
+            ++uLine;
+            ++vLine;
+            target += 8;
+        }
+    }
+
+    return image;
+}
+
+QImage V4L2CaptureSession::decodeRgb24(
+    const uchar *data,
+    const int bytesUsed,
+    const bool bgr,
+    const bool flipVertical) const
+{
+    const auto stride = std::max(bytesPerLine_, width_ * 3);
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_) {
+        return {};
+    }
+
+    QImage image(width_, height_, QImage::Format_RGBX8888);
+    for (int y = 0; y < height_; ++y) {
+        const int sourceY = flipVertical ? height_ - 1 - y : y;
+        const auto *source = data + sourceY * stride;
+        auto *target = image.scanLine(y);
+        for (int x = 0; x < width_; ++x) {
+            writeRgb24PixelRgbx(source, target, bgr);
+            source += 3;
+            target += 4;
+        }
+    }
+
+    return image;
+}
+
+void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs)
+{
+    const auto nowNs = monotonicNs();
+    if (telemetryWindowStartNs_ == 0) {
+        telemetryWindowStartNs_ = nowNs;
+    }
+
+    ++telemetryFrameCount_;
+    telemetryDecodeTotalNs_ += decodeNs;
+    telemetryDecodeMaxNs_ = std::max(telemetryDecodeMaxNs_, decodeNs);
+    telemetryPayloadTotalBytes_ += bytesUsed;
+
+    const auto elapsedNs = nowNs - telemetryWindowStartNs_;
+    if (elapsedNs < telemetryWindowNs) {
+        return;
+    }
+
+    capture::VideoTelemetrySnapshot snapshot;
+    snapshot.width = width_;
+    snapshot.height = height_;
+    snapshot.configuredFps = configuredFps_;
+    snapshot.pixelFormat = fourCcToString(pixelFormat_);
+    snapshot.decodedFps = telemetryFrameCount_ * 1'000'000'000.0 / static_cast<double>(elapsedNs);
+    snapshot.decodeAvgMs = telemetryFrameCount_ > 0
+        ? static_cast<double>(telemetryDecodeTotalNs_) / static_cast<double>(telemetryFrameCount_) / 1'000'000.0
+        : 0.0;
+    snapshot.decodeMaxMs = static_cast<double>(telemetryDecodeMaxNs_) / 1'000'000.0;
+    snapshot.payloadAvgKb = telemetryFrameCount_ > 0
+        ? static_cast<double>(telemetryPayloadTotalBytes_) / static_cast<double>(telemetryFrameCount_) / 1024.0
+        : 0.0;
+    snapshot.bufferCount = static_cast<int>(buffers_.size());
+    emit telemetryReady(snapshot);
+
+    telemetryWindowStartNs_ = nowNs;
+    telemetryFrameCount_ = 0;
+    telemetryDecodeTotalNs_ = 0;
+    telemetryDecodeMaxNs_ = 0;
+    telemetryPayloadTotalBytes_ = 0;
 }
 
 void V4L2CaptureSession::cleanupBuffers()

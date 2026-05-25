@@ -20,9 +20,9 @@
 #include <QLabel>
 #include <QLinearGradient>
 #include <QMessageBox>
+#include <QMetaType>
 #include <QPainter>
 #include <QPaintEvent>
-#include <QPixmap>
 #include <QPushButton>
 #include <QSize>
 #include <QSizePolicy>
@@ -48,6 +48,75 @@
 #include <vector>
 
 namespace consolation::ui {
+
+class VideoSurface final : public QWidget {
+public:
+    explicit VideoSurface(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setAutoFillBackground(false);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    }
+
+    void setFrame(const QImage &frame)
+    {
+        frame_ = frame;
+        update();
+    }
+
+    void setOverlay(QWidget *overlay)
+    {
+        overlay_ = overlay;
+        positionOverlay();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        painter.fillRect(rect(), Qt::black);
+        if (frame_.isNull()) {
+            return;
+        }
+
+        auto targetSize = frame_.size();
+        targetSize.scale(size(), Qt::KeepAspectRatio);
+        const QRect target(
+            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
+            targetSize);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        painter.drawImage(target, frame_);
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        positionOverlay();
+    }
+
+private:
+    void positionOverlay()
+    {
+        if (overlay_ == nullptr) {
+            return;
+        }
+
+        overlay_->adjustSize();
+        const int margin = 14;
+        const auto overlaySize = overlay_->sizeHint();
+        overlay_->setGeometry(
+            margin,
+            std::max(margin, height() - overlaySize.height() - margin),
+            std::min(overlaySize.width(), std::max(0, width() - margin * 2)),
+            overlaySize.height());
+        overlay_->raise();
+    }
+
+    QImage frame_;
+    QPointer<QWidget> overlay_;
+};
 
 namespace {
 
@@ -182,6 +251,8 @@ constexpr auto playbackSliderStyle = R"(
         border-radius: 19px;
     }
 )";
+constexpr bool showVideoStatsOverlay = true;
+constexpr bool showAdvancedVideoStats = true;
 
 class GradientBackground final : public QWidget {
 public:
@@ -301,6 +372,8 @@ void addInfoRow(QVBoxLayout *layout, QWidget *parent, const QString &symbol, con
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    qRegisterMetaType<capture::VideoTelemetrySnapshot>("consolation::capture::VideoTelemetrySnapshot");
+
     setWindowTitle(QStringLiteral("%1 %2").arg(
         QString::fromUtf8(consolation::app::AppMetadata::displayName),
         QString::fromUtf8(consolation::app::BuildInfo::releaseVersion)));
@@ -314,6 +387,15 @@ MainWindow::MainWindow(QWidget *parent)
     controlsHideTimer_->setSingleShot(true);
     controlsHideTimer_->setInterval(3000);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this]() { hidePlaybackControls(); });
+
+    videoRenderTimer_ = new QTimer(this);
+    videoRenderTimer_->setSingleShot(true);
+    videoRenderTimer_->setInterval(16);
+    connect(videoRenderTimer_, &QTimer::timeout, this, [this]() { renderLatestVideoFrame(); });
+
+    statsOverlayTimer_ = new QTimer(this);
+    statsOverlayTimer_->setInterval(500);
+    connect(statsOverlayTimer_, &QTimer::timeout, this, [this]() { updateStatsOverlay(); });
 }
 
 MainWindow::~MainWindow()
@@ -342,6 +424,17 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 void MainWindow::buildStoppedState()
 {
     playbackControls_.clear();
+    statsOverlay_.clear();
+    latestVideoFrame_ = {};
+    latestTelemetry_ = {};
+    displayedFramesSinceStats_ = 0;
+    displayedFps_ = 0.0;
+    if (videoRenderTimer_ != nullptr) {
+        videoRenderTimer_->stop();
+    }
+    if (statsOverlayTimer_ != nullptr) {
+        statsOverlayTimer_->stop();
+    }
     if (controlsHideTimer_ != nullptr) {
         controlsHideTimer_->stop();
     }
@@ -576,7 +669,7 @@ void MainWindow::startPlayback()
             showPlaybackState(frame);
             return;
         }
-        updateVideoFrame(frame);
+        scheduleVideoFrame(frame);
     });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
         logCaptureStartup("failed", message);
@@ -585,6 +678,9 @@ void MainWindow::startPlayback()
     });
     connect(captureSession_.get(), &capture::CaptureSession::logMessage, this, [](const QString &message) {
         logCaptureStartup("session", message);
+    });
+    connect(captureSession_.get(), &capture::CaptureSession::telemetryReady, this, [this](const capture::VideoTelemetrySnapshot &snapshot) {
+        latestTelemetry_ = snapshot;
     });
 
     const auto deviceSnapshot = selectedDevice_;
@@ -624,6 +720,17 @@ void MainWindow::startPlayback()
 void MainWindow::showConnectingState()
 {
     playbackControls_.clear();
+    statsOverlay_.clear();
+    latestVideoFrame_ = {};
+    latestTelemetry_ = {};
+    displayedFramesSinceStats_ = 0;
+    displayedFps_ = 0.0;
+    if (videoRenderTimer_ != nullptr) {
+        videoRenderTimer_->stop();
+    }
+    if (statsOverlayTimer_ != nullptr) {
+        statsOverlayTimer_->stop();
+    }
     if (controlsHideTimer_ != nullptr) {
         controlsHideTimer_->stop();
     }
@@ -652,13 +759,24 @@ void MainWindow::showPlaybackState(const QImage &firstFrame)
     auto *layout = new QVBoxLayout(root);
     layout->setContentsMargins(24, 24, 24, 32);
 
-    auto *video = new QLabel(root);
-    video->setAlignment(Qt::AlignCenter);
-    video->setStyleSheet(QStringLiteral("background-color: black; color: #808080; font-size: 24px;"));
-    video->setText(QStringLiteral("Waiting for video frame..."));
-    video->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    layout->addWidget(video, 1);
+    auto *video = new VideoSurface(root);
     videoSurface_ = video;
+
+    auto *statsOverlay = new QLabel(video);
+    statsOverlay->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    statsOverlay->setWordWrap(false);
+    statsOverlay->setMargin(10);
+    statsOverlay->setStyleSheet(QStringLiteral(
+        "QLabel { color: white; background-color: rgba(0, 0, 0, 170); "
+        "border: 1px solid rgba(255, 255, 255, 80); border-radius: 6px; "
+        "font-family: monospace; font-size: 13px; }"));
+    statsOverlay->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
+    statsOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+    statsOverlay_ = statsOverlay;
+    video->setOverlay(statsOverlay);
+    updateStatsOverlay();
+
+    layout->addWidget(video, 1);
 
     auto *controls = new QFrame(root);
     controls->setFixedHeight(58);
@@ -710,6 +828,9 @@ void MainWindow::showPlaybackState(const QImage &firstFrame)
     if (!firstFrame.isNull()) {
         updateVideoFrame(firstFrame);
     }
+    if (statsOverlayTimer_ != nullptr && showVideoStatsOverlay) {
+        statsOverlayTimer_->start();
+    }
     showPlaybackControls();
     resetPlaybackControlsTimer();
 }
@@ -720,11 +841,81 @@ void MainWindow::updateVideoFrame(const QImage &frame)
         return;
     }
 
-    const auto scaled = QPixmap::fromImage(frame).scaled(
-        videoSurface_->size(),
-        Qt::KeepAspectRatio,
-        Qt::FastTransformation);
-    videoSurface_->setPixmap(scaled);
+    videoSurface_->setFrame(frame);
+    ++displayedFramesSinceStats_;
+}
+
+void MainWindow::scheduleVideoFrame(const QImage &frame)
+{
+    if (frame.isNull()) {
+        return;
+    }
+
+    latestVideoFrame_ = frame;
+    if (videoRenderTimer_ != nullptr && !videoRenderTimer_->isActive()) {
+        videoRenderTimer_->start();
+    }
+}
+
+void MainWindow::renderLatestVideoFrame()
+{
+    if (latestVideoFrame_.isNull()) {
+        return;
+    }
+
+    const auto frame = latestVideoFrame_;
+    latestVideoFrame_ = {};
+    updateVideoFrame(frame);
+}
+
+void MainWindow::updateStatsOverlay()
+{
+    if (!statsOverlay_) {
+        return;
+    }
+
+    displayedFps_ = displayedFramesSinceStats_ * 2.0;
+    displayedFramesSinceStats_ = 0;
+
+    if (!showVideoStatsOverlay) {
+        statsOverlay_->hide();
+        return;
+    }
+
+    statsOverlay_->setText(buildStatsOverlayText());
+    statsOverlay_->adjustSize();
+    if (videoSurface_) {
+        videoSurface_->setOverlay(statsOverlay_);
+    }
+    statsOverlay_->show();
+}
+
+QString MainWindow::buildStatsOverlayText() const
+{
+    const auto width = latestTelemetry_.width > 0 ? latestTelemetry_.width : selectedFormat_.width;
+    const auto height = latestTelemetry_.height > 0 ? latestTelemetry_.height : selectedFormat_.height;
+    const auto configuredFps = latestTelemetry_.configuredFps > 0.0 ? latestTelemetry_.configuredFps : selectedFormat_.framesPerSecond;
+    const auto pixelFormat = latestTelemetry_.pixelFormat.isEmpty() ? selectedFormat_.pixelFormat : latestTelemetry_.pixelFormat;
+
+    QStringList fields {
+        QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
+        pixelFormat,
+        QStringLiteral("Fps:%1").arg(QString::number(displayedFps_, 'f', 0)),
+    };
+
+    if (!showAdvancedVideoStats) {
+        return fields.join(QStringLiteral(" | "));
+    }
+
+    fields += QStringList {
+        QStringLiteral("Dec:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
+        QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1)),
+        QStringLiteral("CnvMx:%1").arg(QString::number(latestTelemetry_.decodeMaxMs, 'f', 1)),
+        QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
+        QStringLiteral("Buf:%1").arg(latestTelemetry_.bufferCount),
+        QStringLiteral("Payload:%1KiB").arg(QString::number(latestTelemetry_.payloadAvgKb, 'f', 0)),
+    };
+    return fields.join(QStringLiteral(" | "));
 }
 
 void MainWindow::preconfigureSelectedFormat(const bool force)
@@ -805,6 +996,10 @@ void MainWindow::stopPlayback()
         delete captureThread_;
         captureThread_ = nullptr;
     }
+    if (statsOverlayTimer_ != nullptr) {
+        statsOverlayTimer_->stop();
+    }
+    statsOverlay_.clear();
     videoSurface_.clear();
     buildStoppedState();
 }
@@ -815,6 +1010,10 @@ void MainWindow::stopPlaybackAsync()
     auto *thread = captureThread_;
     captureThread_ = nullptr;
 
+    if (statsOverlayTimer_ != nullptr) {
+        statsOverlayTimer_->stop();
+    }
+    statsOverlay_.clear();
     videoSurface_.clear();
     buildStoppedState();
 

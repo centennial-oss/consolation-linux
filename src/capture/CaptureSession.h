@@ -23,6 +23,7 @@ public:
 
 signals:
     void frameReady(const QImage &frame);
+    void telemetryReady(const VideoTelemetrySnapshot &snapshot);
     void failed(const QString &message);
     void logMessage(const QString &message);
 };

@@ -18,6 +18,8 @@ class QTimer;
 
 namespace consolation::ui {
 
+class VideoSurface;
+
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
@@ -32,6 +34,10 @@ private:
     void showConnectingState();
     void showPlaybackState(const QImage &firstFrame = {});
     void updateVideoFrame(const QImage &frame);
+    void scheduleVideoFrame(const QImage &frame);
+    void renderLatestVideoFrame();
+    void updateStatsOverlay();
+    QString buildStatsOverlayText() const;
     void stopPlayback();
     void stopPlaybackAsync();
     void preconfigureSelectedFormat(bool force = false);
@@ -47,9 +53,16 @@ private:
     capture::CaptureDevice selectedDevice_;
     capture::CaptureFormat selectedFormat_;
     QString preconfiguredFormatKey_;
-    QPointer<QLabel> videoSurface_;
+    QPointer<VideoSurface> videoSurface_;
+    QPointer<QLabel> statsOverlay_;
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
+    QTimer *videoRenderTimer_ = nullptr;
+    QTimer *statsOverlayTimer_ = nullptr;
+    QImage latestVideoFrame_;
+    capture::VideoTelemetrySnapshot latestTelemetry_;
+    int displayedFramesSinceStats_ = 0;
+    double displayedFps_ = 0.0;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     QThread *captureThread_ = nullptr;
 };
