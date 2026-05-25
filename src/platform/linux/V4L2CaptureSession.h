@@ -31,9 +31,9 @@ private:
     [[nodiscard]] QImage decodeFrame(const void *data, int bytesUsed) const;
     [[nodiscard]] QImage decodeYuyv(const uchar *data, int bytesUsed) const;
     [[nodiscard]] QImage decodeNv12(const uchar *data, int bytesUsed) const;
-    [[nodiscard]] QImage decodeYuv420p(const uchar *data, int bytesUsed, bool yvu) const;
+    [[nodiscard]] QImage decodeI420(const uchar *data, int bytesUsed, bool yvu) const;
     [[nodiscard]] QImage decodeRgb24(const uchar *data, int bytesUsed, bool bgr, bool flipVertical) const;
-    [[nodiscard]] QImage acquireRgbxFrame() const;
+    [[nodiscard]] QImage acquireConvertedFrame(QImage::Format format) const;
     void recordDecodedFrame(int bytesUsed, qint64 decodeNs);
     void cleanupBuffers();
     void closeDevice();

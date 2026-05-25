@@ -18,6 +18,9 @@ find_library(LIBV4L2_LIBRARY NAMES v4l2 REQUIRED)
 
 qt_standard_project_setup()
 
+set(UNIT_TEST OFF CACHE BOOL "Disable libyuv unit tests" FORCE)
+add_subdirectory(third_party/libyuv EXCLUDE_FROM_ALL)
+
 set(CONSOLATION_APP_ID "org.centennialoss.consolation")
 set(CONSOLATION_BUILD_DATE "unknown" CACHE STRING "Build date embedded in the app")
 set(CONSOLATION_GIT_COMMIT "unknown" CACHE STRING "Git commit embedded in the app")
@@ -46,12 +49,16 @@ target_include_directories(consolation_core
     PUBLIC
         src
         "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    PRIVATE
+        third_party/libyuv/include
 )
 
 target_link_libraries(consolation_core
     PUBLIC
         Qt6::Core
         Qt6::Gui
+    PRIVATE
+        yuv
 )
 
 add_executable(consolation

@@ -61,8 +61,9 @@ private:
     QTimer *statsOverlayTimer_ = nullptr;
     QImage latestVideoFrame_;
     capture::VideoTelemetrySnapshot latestTelemetry_;
-    int displayedFramesSinceStats_ = 0;
-    double displayedFps_ = 0.0;
+    int uiFramesSinceStats_ = 0;
+    double uiFps_ = 0.0;
+    double paintFps_ = 0.0;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     QThread *captureThread_ = nullptr;
 };

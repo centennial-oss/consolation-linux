@@ -70,12 +70,20 @@ public:
         positionOverlay();
     }
 
+    int takePaintCount()
+    {
+        const auto count = paintCount_;
+        paintCount_ = 0;
+        return count;
+    }
+
 protected:
     void paintEvent(QPaintEvent *event) override
     {
         Q_UNUSED(event);
 
         QPainter painter(this);
+        ++paintCount_;
         painter.fillRect(rect(), Qt::black);
         if (frame_.isNull()) {
             return;
@@ -116,6 +124,7 @@ private:
 
     QImage frame_;
     QPointer<QWidget> overlay_;
+    int paintCount_ = 0;
 };
 
 namespace {
@@ -427,8 +436,9 @@ void MainWindow::buildStoppedState()
     statsOverlay_.clear();
     latestVideoFrame_ = {};
     latestTelemetry_ = {};
-    displayedFramesSinceStats_ = 0;
-    displayedFps_ = 0.0;
+    uiFramesSinceStats_ = 0;
+    uiFps_ = 0.0;
+    paintFps_ = 0.0;
     if (videoRenderTimer_ != nullptr) {
         videoRenderTimer_->stop();
     }
@@ -723,8 +733,9 @@ void MainWindow::showConnectingState()
     statsOverlay_.clear();
     latestVideoFrame_ = {};
     latestTelemetry_ = {};
-    displayedFramesSinceStats_ = 0;
-    displayedFps_ = 0.0;
+    uiFramesSinceStats_ = 0;
+    uiFps_ = 0.0;
+    paintFps_ = 0.0;
     if (videoRenderTimer_ != nullptr) {
         videoRenderTimer_->stop();
     }
@@ -842,7 +853,7 @@ void MainWindow::updateVideoFrame(const QImage &frame)
     }
 
     videoSurface_->setFrame(frame);
-    ++displayedFramesSinceStats_;
+    ++uiFramesSinceStats_;
 }
 
 void MainWindow::scheduleVideoFrame(const QImage &frame)
@@ -874,8 +885,9 @@ void MainWindow::updateStatsOverlay()
         return;
     }
 
-    displayedFps_ = displayedFramesSinceStats_ * 2.0;
-    displayedFramesSinceStats_ = 0;
+    uiFps_ = uiFramesSinceStats_ * 2.0;
+    uiFramesSinceStats_ = 0;
+    paintFps_ = videoSurface_ ? videoSurface_->takePaintCount() * 2.0 : 0.0;
 
     if (!showVideoStatsOverlay) {
         statsOverlay_->hide();
@@ -900,7 +912,7 @@ QString MainWindow::buildStatsOverlayText() const
     QStringList fields {
         QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
         pixelFormat,
-        QStringLiteral("Fps:%1").arg(QString::number(displayedFps_, 'f', 0)),
+        QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
     };
 
     if (!showAdvancedVideoStats) {
@@ -908,7 +920,8 @@ QString MainWindow::buildStatsOverlayText() const
     }
 
     fields += QStringList {
-        QStringLiteral("Dec:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
+        QStringLiteral("UI:%1").arg(QString::number(uiFps_, 'f', 0)),
+        QStringLiteral("Paint:%1").arg(QString::number(paintFps_, 'f', 0)),
         QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1)),
         QStringLiteral("CnvMx:%1").arg(QString::number(latestTelemetry_.decodeMaxMs, 'f', 1)),
         QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
