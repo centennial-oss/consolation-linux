@@ -15,7 +15,7 @@ namespace consolation::capture {
 // last consumer drops its reference (any thread).
 class FrameBufferPool : public std::enable_shared_from_this<FrameBufferPool> {
 public:
-    static constexpr size_t defaultPoolSize = 10;
+    static constexpr size_t defaultPoolSize = 6;
 
     explicit FrameBufferPool(size_t poolSize = defaultPoolSize);
 
