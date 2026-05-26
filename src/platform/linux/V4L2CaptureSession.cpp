@@ -19,7 +19,6 @@ namespace consolation::platform::linux {
 
 namespace {
 
-constexpr size_t rgbxFramePoolSize = 6;
 constexpr qint64 telemetryWindowNs = 500'000'000;
 constexpr int maxFramesPerNotifierActivation = 4;
 
@@ -164,6 +163,10 @@ void V4L2CaptureSession::stop()
 
     cleanupBuffers();
     closeDevice();
+    if (framePool_ != nullptr) {
+        framePool_->reset();
+        framePool_.reset();
+    }
     emit logMessage(QStringLiteral("V4L2 stop complete"));
 }
 
@@ -302,6 +305,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
                             .arg(fourCcToString(pixelFormat_), format.pixelFormat));
     }
 
+    framePool_ = std::make_shared<capture::FrameBufferPool>();
     return true;
 }
 
@@ -379,11 +383,11 @@ void V4L2CaptureSession::handleReadyRead()
 
         if (buffer.index < buffers_.size()) {
             const auto decodeStartNs = monotonicNs();
-            auto image = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
+            auto frame = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
             const auto decodeNs = monotonicNs() - decodeStartNs;
-            if (!image.isNull()) {
+            if (frame && !frame->isNull()) {
                 recordDecodedFrame(static_cast<int>(buffer.bytesused), decodeNs);
-                emit frameReady(std::make_shared<QImage>(std::move(image)));
+                emit frameReady(std::move(frame));
             }
         }
 
@@ -403,14 +407,27 @@ void V4L2CaptureSession::handleReadyRead()
     }
 }
 
-QImage V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed) const
+capture::FrameHandle V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed)
 {
-    if (data == nullptr || bytesUsed <= 0) {
+    if (data == nullptr || bytesUsed <= 0 || framePool_ == nullptr) {
         return {};
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
-        return QImage::fromData(static_cast<const uchar *>(data), bytesUsed).convertToFormat(QImage::Format_RGB32);
+        auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+        if (!frame) {
+            return {};
+        }
+        const QImage decoded =
+            QImage::fromData(static_cast<const uchar *>(data), bytesUsed).convertToFormat(QImage::Format_RGB32);
+        if (decoded.isNull() || decoded.size() != frame->size() || decoded.bytesPerLine() != frame->bytesPerLine()) {
+            return {};
+        }
+        std::memcpy(
+            writableFramePixels(frame)->bits(),
+            decoded.constBits(),
+            static_cast<size_t>(decoded.sizeInBytes()));
+        return frame;
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
@@ -442,61 +459,46 @@ QImage V4L2CaptureSession::decodeFrame(const void *data, const int bytesUsed) co
     return {};
 }
 
-QImage V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed) const
+QImage *V4L2CaptureSession::writableFramePixels(const capture::FrameHandle &frame)
+{
+    if (!frame) {
+        return nullptr;
+    }
+    return const_cast<QImage *>(frame.get());
+}
+
+capture::FrameHandle V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed)
 {
     const auto stride = std::max(bytesPerLine_, width_ * 2);
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_) {
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_ || framePool_ == nullptr) {
         return {};
     }
 
-    QImage image = acquireConvertedFrame(QImage::Format_RGB32);
-    if (image.isNull()) {
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
         return {};
     }
 
-    const auto result = libyuv::YUY2ToARGB(data, stride, image.bits(), image.bytesPerLine(), width_, height_);
+    const auto result = libyuv::YUY2ToARGB(data, stride, image->bits(), image->bytesPerLine(), width_, height_);
     if (result != 0) {
         return {};
     }
-    return image;
-}
-
-QImage V4L2CaptureSession::acquireConvertedFrame(const QImage::Format format) const
-{
-    if (rgbxFramePool_.size() != rgbxFramePoolSize) {
-        rgbxFramePool_.assign(rgbxFramePoolSize, {});
-        nextRgbxFrame_ = 0;
-    }
-
-    for (size_t attempt = 0; attempt < rgbxFramePool_.size(); ++attempt) {
-        auto &frame = rgbxFramePool_[nextRgbxFrame_];
-        nextRgbxFrame_ = (nextRgbxFrame_ + 1) % rgbxFramePool_.size();
-        if (frame.size() != QSize(width_, height_) || frame.format() != format) {
-            frame = QImage(width_, height_, format);
-            return frame;
-        }
-        if (frame.isDetached()) {
-            return frame;
-        }
-    }
-
-    auto &frame = rgbxFramePool_[nextRgbxFrame_];
-    nextRgbxFrame_ = (nextRgbxFrame_ + 1) % rgbxFramePool_.size();
-    frame = QImage(width_, height_, format);
     return frame;
 }
 
-QImage V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed) const
+capture::FrameHandle V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed)
 {
     const auto stride = std::max(bytesPerLine_, width_);
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_ * 3 / 2) {
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_ * 3 / 2 || framePool_ == nullptr) {
         return {};
     }
 
     const auto *yPlane = data;
     const auto *uvPlane = data + stride * height_;
-    QImage image = acquireConvertedFrame(QImage::Format_RGB32);
-    if (image.isNull()) {
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
         return {};
     }
     const auto result = libyuv::NV12ToARGB(
@@ -504,24 +506,24 @@ QImage V4L2CaptureSession::decodeNv12(const uchar *data, const int bytesUsed) co
         stride,
         uvPlane,
         stride,
-        image.bits(),
-        image.bytesPerLine(),
+        image->bits(),
+        image->bytesPerLine(),
         width_,
         height_);
     if (result != 0) {
         return {};
     }
-    return image;
+    return frame;
 }
 
-QImage V4L2CaptureSession::decodeI420(const uchar *data, const int bytesUsed, const bool yvu) const
+capture::FrameHandle V4L2CaptureSession::decodeI420(const uchar *data, const int bytesUsed, const bool yvu)
 {
     const auto yStride = std::max(bytesPerLine_, width_);
     const auto chromaStride = (yStride + 1) / 2;
     const auto chromaHeight = (height_ + 1) / 2;
     const auto yPlaneBytes = yStride * height_;
     const auto chromaPlaneBytes = chromaStride * chromaHeight;
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < yPlaneBytes + chromaPlaneBytes * 2) {
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < yPlaneBytes + chromaPlaneBytes * 2 || framePool_ == nullptr) {
         return {};
     }
 
@@ -530,8 +532,9 @@ QImage V4L2CaptureSession::decodeI420(const uchar *data, const int bytesUsed, co
     const auto *secondChromaPlane = firstChromaPlane + chromaPlaneBytes;
     const auto *uPlane = yvu ? secondChromaPlane : firstChromaPlane;
     const auto *vPlane = yvu ? firstChromaPlane : secondChromaPlane;
-    QImage image = acquireConvertedFrame(QImage::Format_RGB32);
-    if (image.isNull()) {
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
         return {};
     }
 
@@ -542,43 +545,44 @@ QImage V4L2CaptureSession::decodeI420(const uchar *data, const int bytesUsed, co
         chromaStride,
         vPlane,
         chromaStride,
-        image.bits(),
-        image.bytesPerLine(),
+        image->bits(),
+        image->bytesPerLine(),
         width_,
         height_);
     if (result != 0) {
         return {};
     }
 
-    return image;
+    return frame;
 }
 
-QImage V4L2CaptureSession::decodeRgb24(
+capture::FrameHandle V4L2CaptureSession::decodeRgb24(
     const uchar *data,
     const int bytesUsed,
     const bool bgr,
-    const bool flipVertical) const
+    const bool flipVertical)
 {
     const auto stride = std::max(bytesPerLine_, width_ * 3);
-    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_) {
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < stride * height_ || framePool_ == nullptr) {
         return {};
     }
 
-    QImage image = acquireConvertedFrame(QImage::Format_RGB32);
-    if (image.isNull()) {
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
         return {};
     }
 
     const auto *source = flipVertical ? data + (height_ - 1) * stride : data;
     const auto sourceStride = flipVertical ? -stride : stride;
     const auto result = bgr
-        ? libyuv::RGB24ToARGB(source, sourceStride, image.bits(), image.bytesPerLine(), width_, height_)
-        : libyuv::RAWToARGB(source, sourceStride, image.bits(), image.bytesPerLine(), width_, height_);
+        ? libyuv::RGB24ToARGB(source, sourceStride, image->bits(), image->bytesPerLine(), width_, height_)
+        : libyuv::RAWToARGB(source, sourceStride, image->bits(), image->bytesPerLine(), width_, height_);
     if (result != 0) {
         return {};
     }
 
-    return image;
+    return frame;
 }
 
 void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs)

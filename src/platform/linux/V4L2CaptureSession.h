@@ -1,9 +1,11 @@
 #pragma once
 
 #include "capture/CaptureSession.h"
+#include "capture/FrameBufferPool.h"
 
 #include <QSocketNotifier>
 
+#include <memory>
 #include <vector>
 
 namespace consolation::platform::linux {
@@ -28,12 +30,12 @@ private:
     [[nodiscard]] bool configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format);
     [[nodiscard]] bool allocateBuffers();
     [[nodiscard]] bool queueBuffers();
-    [[nodiscard]] QImage decodeFrame(const void *data, int bytesUsed) const;
-    [[nodiscard]] QImage decodeYuyv(const uchar *data, int bytesUsed) const;
-    [[nodiscard]] QImage decodeNv12(const uchar *data, int bytesUsed) const;
-    [[nodiscard]] QImage decodeI420(const uchar *data, int bytesUsed, bool yvu) const;
-    [[nodiscard]] QImage decodeRgb24(const uchar *data, int bytesUsed, bool bgr, bool flipVertical) const;
-    [[nodiscard]] QImage acquireConvertedFrame(QImage::Format format) const;
+    [[nodiscard]] capture::FrameHandle decodeFrame(const void *data, int bytesUsed);
+    [[nodiscard]] capture::FrameHandle decodeYuyv(const uchar *data, int bytesUsed);
+    [[nodiscard]] capture::FrameHandle decodeNv12(const uchar *data, int bytesUsed);
+    [[nodiscard]] capture::FrameHandle decodeI420(const uchar *data, int bytesUsed, bool yvu);
+    [[nodiscard]] capture::FrameHandle decodeRgb24(const uchar *data, int bytesUsed, bool bgr, bool flipVertical);
+    [[nodiscard]] QImage *writableFramePixels(const capture::FrameHandle &frame);
     void recordDecodedFrame(int bytesUsed, qint64 decodeNs);
     void cleanupBuffers();
     void closeDevice();
@@ -46,8 +48,7 @@ private:
     double configuredFps_ = 0.0;
     bool streaming_ = false;
     std::vector<Buffer> buffers_;
-    mutable std::vector<QImage> rgbxFramePool_;
-    mutable size_t nextRgbxFrame_ = 0;
+    std::shared_ptr<capture::FrameBufferPool> framePool_;
     qint64 telemetryWindowStartNs_ = 0;
     int telemetryFrameCount_ = 0;
     qint64 telemetryDecodeTotalNs_ = 0;

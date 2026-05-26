@@ -40,6 +40,8 @@ add_library(consolation_core STATIC
     src/capture/CaptureBackendManager.h
     src/capture/CaptureSession.h
     src/capture/CaptureTypes.h
+    src/capture/FrameBufferPool.cpp
+    src/capture/FrameBufferPool.h
     src/platform/linux/V4L2CaptureSession.cpp
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp
