@@ -355,9 +355,11 @@ bool V4L2CaptureSession::allocateBuffers()
         }
     }
 
-    if (dmaBufExportSupported_ && pixelFormat_ == V4L2_PIX_FMT_NV12) {
+    if (dmaBufExportSupported_ && pixelFormatSupportsDmaBufDisplay(pixelFormat_)) {
         dmaBufDisplayEnabled_ = true;
-        emit logMessage(QStringLiteral("V4L2 NV12 DMA-BUF export enabled for zero-copy display"));
+        emit logMessage(
+            QStringLiteral("V4L2 %1 DMA-BUF export enabled for zero-copy display")
+                .arg(fourCcToString(pixelFormat_)));
     }
 
     return true;
@@ -711,10 +713,16 @@ void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
     dmaBufDisplayRequested_.store(requested);
 }
 
+bool V4L2CaptureSession::pixelFormatSupportsDmaBufDisplay(const quint32 pixelFormat)
+{
+    return pixelFormat == V4L2_PIX_FMT_NV12 || pixelFormat == V4L2_PIX_FMT_RGB24 ||
+        pixelFormat == V4L2_PIX_FMT_BGR24;
+}
+
 bool V4L2CaptureSession::useDmaBufDisplayPath() const
 {
     return dmaBufDisplayRequested_.load() && dmaBufDisplayEnabled_ && dmaBufExportSupported_ &&
-        pixelFormat_ == V4L2_PIX_FMT_NV12 && fd_ >= 0 && streaming_;
+        pixelFormatSupportsDmaBufDisplay(pixelFormat_) && fd_ >= 0 && streaming_;
 }
 
 capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_buffer &buffer)
@@ -733,8 +741,22 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     payload->dmaFd = captureBuffer.dmaFd;
     payload->width = width_;
     payload->height = height_;
-    payload->stride = std::max(bytesPerLine_, width_);
     payload->bytesUsed = static_cast<int>(buffer.bytesused);
+
+    if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
+        payload->layout = capture::DmaBufLayout::Nv12;
+        payload->stride = std::max(bytesPerLine_, width_);
+    } else if (pixelFormat_ == V4L2_PIX_FMT_RGB24) {
+        payload->layout = capture::DmaBufLayout::Rgb888;
+        payload->stride = std::max(bytesPerLine_, width_ * 3);
+    } else if (pixelFormat_ == V4L2_PIX_FMT_BGR24) {
+        payload->layout = capture::DmaBufLayout::Bgr888;
+        payload->stride = std::max(bytesPerLine_, width_ * 3);
+        payload->flipVertical = true;
+    } else {
+        delete payload;
+        return {};
+    }
 
     return capture::DmaBufFrameHandle(payload, [this](capture::DmaBufFrame *frame) {
         if (frame != nullptr) {
@@ -758,7 +780,8 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
     }
 
     if (dmaBufDisplayRequested_.load()) {
-        emit logMessage(QStringLiteral("NV12 DMA-BUF display falling back to libyuv CPU decode"));
+        emit logMessage(
+            QStringLiteral("%1 DMA-BUF display falling back to CPU decode").arg(fourCcToString(pixelFormat_)));
     }
     dmaBufDisplayRequested_.store(false);
 

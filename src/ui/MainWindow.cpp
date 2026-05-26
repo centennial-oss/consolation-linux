@@ -6,6 +6,7 @@
 #include "capture/CaptureSession.h"
 #include "capture/DmaBufFrame.h"
 #include "platform/linux/Nv12DmaBufGl.h"
+#include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/PipeWireAudioSession.h"
 #include "platform/linux/V4L2CaptureSession.h"
 #include "ui/AppIcon.h"
@@ -268,14 +269,20 @@ public:
     {
         dmaFrame_.reset();
         boundDmaFrame_.reset();
-        if (!nv12Gl_.has_value()) {
+        if (!nv12Gl_.has_value() && !rgbGl_.has_value()) {
             return;
         }
 
         if (context() != nullptr && context()->isValid()) {
             makeCurrent();
-            nv12Gl_->releaseAllSlots();
-            nv12Gl_->releaseFrame();
+            if (nv12Gl_.has_value()) {
+                nv12Gl_->releaseAllSlots();
+                nv12Gl_->releaseFrame();
+            }
+            if (rgbGl_.has_value()) {
+                rgbGl_->releaseAllSlots();
+                rgbGl_->releaseFrame();
+            }
             doneCurrent();
         }
     }
@@ -287,6 +294,10 @@ public:
             if (nv12Gl_.has_value()) {
                 nv12Gl_->shutdown();
                 nv12Gl_.reset();
+            }
+            if (rgbGl_.has_value()) {
+                rgbGl_->shutdown();
+                rgbGl_.reset();
             }
             doneCurrent();
         }
@@ -303,6 +314,9 @@ public:
         boundDmaFrame_.reset();
         if (nv12Gl_.has_value()) {
             nv12Gl_->releaseFrame();
+        }
+        if (rgbGl_.has_value()) {
+            rgbGl_->releaseFrame();
         }
         frame_ = std::move(frame);
         updateTargetRect();
@@ -339,12 +353,27 @@ protected:
             std::cout << "; NV12 will use libyuv CPU decode" << std::endl;
             std::cout.flush();
         }
+
+        rgbGl_.emplace();
+        if (!rgbGl_->initialize()) {
+            const auto reason = rgbGl_->lastInitFailure();
+            rgbGl_.reset();
+            std::cout << "[MainWindow capture] RGB/BGR DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; RGB24/BGR24 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
     }
 
     void paintGL() override
     {
         ++paintCount_;
-        if (dmaFrame_ && (!nv12Gl_ || !nv12Gl_->isAvailable())) {
+        if (dmaFrame_) {
+            if (tryPaintDmaFrame()) {
+                return;
+            }
             auto failedFrame = std::move(dmaFrame_);
             if (dmaCpuFallbackHandler_) {
                 dmaCpuFallbackHandler_(std::move(failedFrame));
@@ -352,26 +381,6 @@ protected:
                 failedFrame.reset();
             }
             return;
-        }
-
-        if (dmaFrame_ && nv12Gl_ && nv12Gl_->isAvailable()) {
-            if (boundDmaFrame_ != dmaFrame_) {
-                if (!nv12Gl_->bindFrame(dmaFrame_)) {
-                    boundDmaFrame_.reset();
-                    auto failedFrame = std::move(dmaFrame_);
-                    if (dmaCpuFallbackHandler_) {
-                        dmaCpuFallbackHandler_(std::move(failedFrame));
-                    } else {
-                        failedFrame.reset();
-                    }
-                } else {
-                    boundDmaFrame_ = dmaFrame_;
-                }
-            }
-            if (boundDmaFrame_) {
-                nv12Gl_->draw(size(), targetRect_, static_cast<float>(devicePixelRatioF()));
-                return;
-            }
         }
 
         QPainter painter(this);
@@ -419,7 +428,49 @@ private:
         }
     }
 
+    bool tryPaintDmaFrame()
+    {
+        if (!dmaFrame_) {
+            return false;
+        }
+
+        const auto dpr = static_cast<float>(devicePixelRatioF());
+        if (dmaFrame_->layout == capture::DmaBufLayout::Nv12) {
+            if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!nv12Gl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            nv12Gl_->draw(size(), targetRect_, dpr);
+            return true;
+        }
+
+        if (dmaFrame_->layout == capture::DmaBufLayout::Rgb888 ||
+            dmaFrame_->layout == capture::DmaBufLayout::Bgr888) {
+            if (!rgbGl_ || !rgbGl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!rgbGl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            rgbGl_->draw(size(), targetRect_, dpr);
+            return true;
+        }
+
+        return false;
+    }
+
     std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
+    std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
     capture::FrameHandle frame_;
     capture::DmaBufFrameHandle dmaFrame_;
     capture::DmaBufFrameHandle boundDmaFrame_;
@@ -428,6 +479,14 @@ private:
     QRect targetRect_;
     int paintCount_ = 0;
 };
+
+bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
+{
+    const auto upper = pixelFormat.toUpper();
+    return upper == QStringLiteral("NV12") || upper == QStringLiteral("RGB3") ||
+        upper == QStringLiteral("RGB24") || upper == QStringLiteral("BGR3") ||
+        upper == QStringLiteral("BGR24");
+}
 
 bool canCreateOpenGLContext()
 {
@@ -1571,8 +1630,7 @@ void MainWindow::startPlayback()
     const auto deviceSnapshot = selectedDevice_;
     const auto formatSnapshot = selectedFormat_;
     const auto dmaDisplayRequested = deviceSnapshot.backend == capture::CaptureBackend::V4L2 &&
-        formatSnapshot.pixelFormat.compare(QStringLiteral("NV12"), Qt::CaseInsensitive) == 0 &&
-        canCreateOpenGLContext();
+        pixelFormatSupportsDmaDisplay(formatSnapshot.pixelFormat) && canCreateOpenGLContext();
     logCaptureStartup(
         "queuing CaptureSession::start",
         QStringLiteral("%1 (%2)").arg(deviceSnapshot.devicePath, formatSnapshot.label));

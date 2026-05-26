@@ -38,6 +38,7 @@ private:
     [[nodiscard]] capture::DmaBufFrameHandle makeDmaBufFrameHandle(const v4l2_buffer &buffer);
     Q_INVOKABLE void requeueCaptureBuffer(int bufferIndex);
     [[nodiscard]] bool useDmaBufDisplayPath() const;
+    [[nodiscard]] static bool pixelFormatSupportsDmaBufDisplay(quint32 pixelFormat);
     [[nodiscard]] bool configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format);
     [[nodiscard]] bool allocateBuffers();
     [[nodiscard]] bool queueBuffers();
