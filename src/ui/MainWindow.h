@@ -37,8 +37,8 @@ private:
     void startPlayback();
     void showConnectingState();
     void showStoppingState();
-    void showPlaybackState(QImage firstFrame = {});
-    void updateVideoFrame(QImage frame);
+    void showPlaybackState(capture::FrameHandle firstFrame = {});
+    void updateVideoFrame(capture::FrameHandle frame);
     void updateStatsOverlay();
     QString buildStatsOverlayText() const;
     void stopPlayback();

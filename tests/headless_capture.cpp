@@ -1,5 +1,6 @@
 #include "capture/CaptureBackendManager.h"
 #include "capture/CaptureSession.h"
+#include "capture/CaptureTypes.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -23,6 +24,8 @@ QString backendName(const consolation::capture::CaptureBackend backend)
 
 int main(int argc, char *argv[])
 {
+    qRegisterMetaType<consolation::capture::FrameHandle>();
+
     QCoreApplication app(argc, argv);
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Headless Consolation capture smoke runner"));
@@ -127,9 +130,12 @@ int main(int argc, char *argv[])
             out << "[capture] " << message << "\n";
             out.flush();
         });
-        QObject::connect(attachedSession, &consolation::capture::CaptureSession::frameReady, &app, [&](const QImage &frame) {
+        QObject::connect(attachedSession, &consolation::capture::CaptureSession::frameReady, &app, [&](const consolation::capture::FrameHandle &frame) {
+            if (!frame || frame->isNull()) {
+                return;
+            }
             ++frames;
-            out << "[frame] " << frames << " " << frame.width() << "x" << frame.height() << " format=" << frame.format() << "\n";
+            out << "[frame] " << frames << " " << frame->width() << "x" << frame->height() << " format=" << frame->format() << "\n";
             out.flush();
             if (frames >= 5) {
                 exitCode = 0;

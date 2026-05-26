@@ -2,7 +2,6 @@
 
 #include "capture/CaptureTypes.h"
 
-#include <QImage>
 #include <QObject>
 
 namespace consolation::capture {
@@ -22,7 +21,7 @@ public:
     virtual void stop() = 0;
 
 signals:
-    void frameReady(QImage frame);
+    void frameReady(FrameHandle frame);
     void telemetryReady(const VideoTelemetrySnapshot &snapshot);
     void failed(const QString &message);
     void logMessage(const QString &message);

@@ -383,7 +383,7 @@ void V4L2CaptureSession::handleReadyRead()
             const auto decodeNs = monotonicNs() - decodeStartNs;
             if (!image.isNull()) {
                 recordDecodedFrame(static_cast<int>(buffer.bytesused), decodeNs);
-                emit frameReady(std::move(image));
+                emit frameReady(std::make_shared<QImage>(std::move(image)));
             }
         }
 

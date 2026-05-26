@@ -1,10 +1,17 @@
 #pragma once
 
+#include <QImage>
 #include <QMetaType>
 #include <QString>
+
+#include <memory>
 #include <vector>
 
 namespace consolation::capture {
+
+// Shared ownership of decoded frame pixels. Queued cross-thread delivery copies only this
+// handle (refcount), not the underlying QImage buffer.
+using FrameHandle = std::shared_ptr<const QImage>;
 
 enum class CaptureBackend {
     Mock,
@@ -44,4 +51,5 @@ struct VideoTelemetrySnapshot {
 
 } // namespace consolation::capture
 
+Q_DECLARE_METATYPE(consolation::capture::FrameHandle)
 Q_DECLARE_METATYPE(consolation::capture::VideoTelemetrySnapshot)

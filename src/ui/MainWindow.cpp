@@ -359,7 +359,7 @@ public:
         renderer_->setFrame(std::move(frame));
     }
 
-    void setPendingFrame(QImage frame)
+    void setPendingFrame(capture::FrameHandle frame)
     {
         pendingFrame_ = std::move(frame);
         if (!renderQueued_) {
@@ -405,12 +405,13 @@ private:
     void renderPendingFrame()
     {
         renderQueued_ = false;
-        if (pendingFrame_.isNull()) {
+        if (!pendingFrame_ || pendingFrame_->isNull()) {
+            pendingFrame_.reset();
             return;
         }
 
-        setFrame(std::move(pendingFrame_));
-        pendingFrame_ = {};
+        setFrame(QImage(*pendingFrame_));
+        pendingFrame_.reset();
         ++uiFrameCount_;
     }
 
@@ -444,7 +445,7 @@ private:
 
     FrameRenderer *renderer_ = nullptr;
     QWidget *rendererWidget_ = nullptr;
-    QImage pendingFrame_;
+    capture::FrameHandle pendingFrame_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
@@ -1324,7 +1325,10 @@ void MainWindow::startPlayback()
     captureSession_->moveToThread(captureThread_);
     logCaptureStartup("session moved to capture thread");
 
-    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](QImage frame) {
+    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](capture::FrameHandle frame) {
+        if (!frame || frame->isNull()) {
+            return;
+        }
         if (!videoSurface_) {
             showPlaybackState(std::move(frame));
             return;
@@ -1442,7 +1446,7 @@ void MainWindow::showStoppingState()
     setCentralWidget(root);
 }
 
-void MainWindow::showPlaybackState(QImage firstFrame)
+void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
 {
     if (startupRefreshTimer_ != nullptr) {
         startupRefreshTimer_->stop();
@@ -1534,7 +1538,7 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     video->setControlsOverlay(controls);
     enableMouseTrackingTree(root);
     setCentralWidget(root);
-    if (!firstFrame.isNull()) {
+    if (firstFrame && !firstFrame->isNull()) {
         updateVideoFrame(std::move(firstFrame));
     }
     if (statsOverlayTimer_ != nullptr && showVideoStatsOverlay) {
@@ -1544,9 +1548,9 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     resetPlaybackControlsTimer();
 }
 
-void MainWindow::updateVideoFrame(QImage frame)
+void MainWindow::updateVideoFrame(capture::FrameHandle frame)
 {
-    if (!videoSurface_ || frame.isNull()) {
+    if (!videoSurface_ || !frame || frame->isNull()) {
         return;
     }
 
