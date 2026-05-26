@@ -403,21 +403,29 @@ bool RgbDmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, const
     }
 
     releaseSlot(bufferIndex);
+    lastBindFailure_.clear();
 
-    const auto fourcc = drmFourccForLayout(frame->layout);
+    auto fourcc = drmFourccForLayout(frame->layout);
     if (fourcc == 0) {
+        lastBindFailure_ = QStringLiteral("unsupported RGB dma-buf layout");
         return false;
     }
 
     const auto display = static_cast<EGLDisplay>(eglDisplay_);
     slot.eglImage = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, fourcc);
+    if (slot.eglImage == EGL_NO_IMAGE_KHR && frame->layout == capture::DmaBufLayout::Bgr888) {
+        fourcc = DRM_FORMAT_RGB888;
+        slot.eglImage = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, fourcc);
+    }
     if (slot.eglImage == EGL_NO_IMAGE_KHR) {
+        lastBindFailure_ = QStringLiteral("EGL RGB/BGR dma-buf import failed");
         return false;
     }
 
     glGenTexturesFn(1, &slot.textureId);
     if (!bindEglImageToTexture(slot.textureId, slot.eglImage)) {
         releaseSlot(bufferIndex);
+        lastBindFailure_ = QStringLiteral("EGLImage to GL texture bind failed");
         return false;
     }
 

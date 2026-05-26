@@ -474,6 +474,13 @@ private:
             }
             if (boundDmaFrame_ != dmaFrame_) {
                 if (!nv12Gl_->bindFrame(dmaFrame_)) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        std::cout << "[MainWindow capture] NV12 dma-buf bind failed: "
+                                  << nv12Gl_->lastInitFailure().toStdString() << std::endl;
+                        std::cout.flush();
+                    }
                     boundDmaFrame_.reset();
                     return false;
                 }
@@ -490,6 +497,16 @@ private:
             }
             if (boundDmaFrame_ != dmaFrame_) {
                 if (!rgbGl_->bindFrame(dmaFrame_)) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        const auto reason = rgbGl_->lastBindFailure().isEmpty()
+                            ? rgbGl_->lastInitFailure()
+                            : rgbGl_->lastBindFailure();
+                        std::cout << "[MainWindow capture] RGB/BGR dma-buf bind failed: "
+                                  << reason.toStdString() << std::endl;
+                        std::cout.flush();
+                    }
                     boundDmaFrame_.reset();
                     return false;
                 }
@@ -505,6 +522,16 @@ private:
             }
             if (boundDmaFrame_ != dmaFrame_) {
                 if (!yuyvGl_->bindFrame(dmaFrame_)) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        const auto reason = yuyvGl_->lastBindFailure().isEmpty()
+                            ? yuyvGl_->lastInitFailure()
+                            : yuyvGl_->lastBindFailure();
+                        std::cout << "[MainWindow capture] YUYV dma-buf bind failed: "
+                                  << reason.toStdString() << std::endl;
+                        std::cout.flush();
+                    }
                     boundDmaFrame_.reset();
                     return false;
                 }

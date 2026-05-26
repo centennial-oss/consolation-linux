@@ -22,8 +22,11 @@
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
 #endif
 
-#ifndef DRM_FORMAT_YUYV
-#define DRM_FORMAT_YUYV static_cast<EGLint>(0x56595559)
+#ifndef DRM_FORMAT_RG88
+#define DRM_FORMAT_RG88 static_cast<EGLint>(0x38385247)
+#endif
+#ifndef DRM_FORMAT_GR88
+#define DRM_FORMAT_GR88 static_cast<EGLint>(0x38384752)
 #endif
 
 namespace consolation::platform::linux {
@@ -62,23 +65,30 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         }
     )";
 
-    // BT.601 full-range; macropixel (Y0,U,Y1,V) in (r,g,b,a) per Mesa-style YUYV import.
+    // Import YUYV bytes as RG88/GR88 so shader channel mapping is deterministic.
     static constexpr char esFragmentShader[] = R"(
         precision mediump float;
         varying vec2 vTexCoord;
         uniform sampler2D uFrame;
         uniform float uWidth;
+        uniform int uPairOrder;
+        vec2 bytePair(vec4 sampleValue) {
+            return (uPairOrder == 0) ? sampleValue.rg : sampleValue.gr;
+        }
         void main() {
-            vec2 tc = vTexCoord;
-            vec4 c = texture2D(uFrame, tc);
-            float x = floor(tc.x * uWidth);
-            float y = (mod(x, 2.0) < 1.0) ? c.r : c.b;
-            float u = c.g - 0.5;
-            float v = c.a - 0.5;
-            float r = y + 1.402 * v;
-            float g = y - 0.344 * u - 0.714 * v;
-            float b = y + 1.772 * u;
-            gl_FragColor = vec4(r, g, b, 1.0);
+            float x = floor(vTexCoord.x * uWidth);
+            float isOdd = mod(x, 2.0);
+            float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
+            vec2 current = bytePair(texture2D(uFrame, vTexCoord));
+            vec2 paired = bytePair(texture2D(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
+            float y = current.x;
+            float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
+            float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
+            gl_FragColor = vec4(
+                y + 1.402 * v,
+                y - 0.344 * u - 0.714 * v,
+                y + 1.772 * u,
+                1.0);
         }
     )";
 
@@ -98,18 +108,25 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         in vec2 vTexCoord;
         uniform sampler2D uFrame;
         uniform float uWidth;
+        uniform int uPairOrder;
         out vec4 fragColor;
+        vec2 bytePair(vec4 sampleValue) {
+            return (uPairOrder == 0) ? sampleValue.rg : sampleValue.gr;
+        }
         void main() {
-            vec2 tc = vTexCoord;
-            vec4 c = texture(uFrame, tc);
-            float x = floor(tc.x * uWidth);
-            float y = (mod(x, 2.0) < 1.0) ? c.r : c.b;
-            float u = c.g - 0.5;
-            float v = c.a - 0.5;
-            float r = y + 1.402 * v;
-            float g = y - 0.344 * u - 0.714 * v;
-            float b = y + 1.772 * u;
-            fragColor = vec4(r, g, b, 1.0);
+            float x = floor(vTexCoord.x * uWidth);
+            float isOdd = mod(x, 2.0);
+            float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
+            vec2 current = bytePair(texture(uFrame, vTexCoord));
+            vec2 paired = bytePair(texture(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
+            float y = current.x;
+            float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
+            float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
+            fragColor = vec4(
+                y + 1.402 * v,
+                y - 0.344 * u - 0.714 * v,
+                y + 1.772 * u,
+                1.0);
         }
     )";
 
@@ -129,17 +146,24 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         varying vec2 vTexCoord;
         uniform sampler2D uFrame;
         uniform float uWidth;
+        uniform int uPairOrder;
+        vec2 bytePair(vec4 sampleValue) {
+            return (uPairOrder == 0) ? sampleValue.rg : sampleValue.gr;
+        }
         void main() {
-            vec2 tc = vTexCoord;
-            vec4 c = texture2D(uFrame, tc);
-            float x = floor(tc.x * uWidth);
-            float y = (mod(x, 2.0) < 1.0) ? c.r : c.b;
-            float u = c.g - 0.5;
-            float v = c.a - 0.5;
-            float r = y + 1.402 * v;
-            float g = y - 0.344 * u - 0.714 * v;
-            float b = y + 1.772 * u;
-            gl_FragColor = vec4(r, g, b, 1.0);
+            float x = floor(vTexCoord.x * uWidth);
+            float isOdd = mod(x, 2.0);
+            float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
+            vec2 current = bytePair(texture2D(uFrame, vTexCoord));
+            vec2 paired = bytePair(texture2D(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
+            float y = current.x;
+            float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
+            float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
+            gl_FragColor = vec4(
+                y + 1.402 * v,
+                y - 0.344 * u - 0.714 * v,
+                y + 1.772 * u,
+                1.0);
         }
     )";
 
@@ -220,8 +244,8 @@ bool bindEglImageToTexture(const unsigned int textureId, void *const eglImage)
     }
 
     glBindTextureFn(GL_TEXTURE_2D, textureId);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glEGLImageTargetTexture2DOESFn(GL_TEXTURE_2D, static_cast<EGLImageKHR>(eglImage));
@@ -314,6 +338,7 @@ bool YuyvDmaBufGl::initialize()
 
     frameUniform_ = glGetUniformLocation(programId_, "uFrame");
     widthUniform_ = glGetUniformLocation(programId_, "uWidth");
+    pairOrderUniform_ = glGetUniformLocation(programId_, "uPairOrder");
 
     static constexpr float quadVertices[] = {
         -1.0F, -1.0F, 0.0F, 1.0F,
@@ -326,7 +351,7 @@ bool YuyvDmaBufGl::initialize()
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    if (programId_ == 0 || frameUniform_ < 0 || widthUniform_ < 0) {
+    if (programId_ == 0 || frameUniform_ < 0 || widthUniform_ < 0 || pairOrderUniform_ < 0) {
         lastInitFailure_ = QStringLiteral("YUYV shader program setup failed");
         return false;
     }
@@ -385,17 +410,26 @@ bool YuyvDmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, cons
     }
 
     releaseSlot(bufferIndex);
+    lastBindFailure_.clear();
 
     const auto display = static_cast<EGLDisplay>(eglDisplay_);
+    slot.pairOrder = 0;
     slot.eglImage =
-        createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, DRM_FORMAT_YUYV);
+        createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, DRM_FORMAT_RG88);
     if (slot.eglImage == EGL_NO_IMAGE_KHR) {
+        slot.pairOrder = 1;
+        slot.eglImage =
+            createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, DRM_FORMAT_GR88);
+    }
+    if (slot.eglImage == EGL_NO_IMAGE_KHR) {
+        lastBindFailure_ = QStringLiteral("EGL YUYV raw RG88/GR88 dma-buf import failed");
         return false;
     }
 
     glGenTexturesFn(1, &slot.textureId);
     if (!bindEglImageToTexture(slot.textureId, slot.eglImage)) {
         releaseSlot(bufferIndex);
+        lastBindFailure_ = QStringLiteral("EGLImage to GL texture bind failed");
         return false;
     }
 
@@ -423,6 +457,7 @@ bool YuyvDmaBufGl::bindFrame(const capture::DmaBufFrameHandle &frame)
 
     activeSlot_ = frame->bufferIndex;
     boundWidth_ = static_cast<float>(frame->width);
+    boundPairOrder_ = slots_[static_cast<size_t>(frame->bufferIndex)].pairOrder;
     boundFrame_ = frame;
     return true;
 }
@@ -460,6 +495,7 @@ void YuyvDmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const 
     glUseProgram(programId_);
     glUniform1i(frameUniform_, 0);
     glUniform1f(widthUniform_, boundWidth_);
+    glUniform1i(pairOrderUniform_, boundPairOrder_);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTextureFn(GL_TEXTURE_2D, slot.textureId);

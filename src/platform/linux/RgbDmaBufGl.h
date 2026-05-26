@@ -34,6 +34,11 @@ public:
         return lastInitFailure_;
     }
 
+    [[nodiscard]] QString lastBindFailure() const
+    {
+        return lastBindFailure_;
+    }
+
 private:
     struct SlotBinding {
         int dmaFd = -1;
@@ -49,6 +54,7 @@ private:
 
     bool available_ = false;
     QString lastInitFailure_;
+    QString lastBindFailure_;
     void *eglDisplay_ = nullptr;
     unsigned int programId_ = 0;
     unsigned int vboId_ = 0;

@@ -34,9 +34,15 @@ public:
         return lastInitFailure_;
     }
 
+    [[nodiscard]] QString lastBindFailure() const
+    {
+        return lastBindFailure_;
+    }
+
 private:
     struct SlotBinding {
         int dmaFd = -1;
+        int pairOrder = 0;
         void *eglImage = nullptr;
         unsigned int textureId = 0;
     };
@@ -48,13 +54,16 @@ private:
 
     bool available_ = false;
     QString lastInitFailure_;
+    QString lastBindFailure_;
     void *eglDisplay_ = nullptr;
     unsigned int programId_ = 0;
     unsigned int vboId_ = 0;
     int frameUniform_ = -1;
     int widthUniform_ = -1;
+    int pairOrderUniform_ = -1;
     int activeSlot_ = -1;
     float boundWidth_ = 0.0F;
+    int boundPairOrder_ = 0;
     capture::DmaBufFrameHandle boundFrame_;
     std::array<SlotBinding, maxBufferSlots> slots_ {};
 };

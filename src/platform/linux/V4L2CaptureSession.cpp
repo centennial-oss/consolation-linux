@@ -806,9 +806,9 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
 
     if (dmaBufDisplayRequested_.load()) {
         emit logMessage(
-            QStringLiteral("%1 DMA-BUF display falling back to CPU decode").arg(capture::fourCcToString(pixelFormat_)));
+            QStringLiteral("%1 DMA-BUF display falling back to CPU decode for one frame")
+                .arg(capture::fourCcToString(pixelFormat_)));
     }
-    dmaBufDisplayRequested_.store(false);
 
     const auto bufferIndex = frame->bufferIndex;
     const auto bytesUsed = frame->bytesUsed;
