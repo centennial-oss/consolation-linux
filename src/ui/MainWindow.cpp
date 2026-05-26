@@ -177,6 +177,7 @@ public:
     void setFrame(capture::FrameHandle frame) override
     {
         frame_ = std::move(frame);
+        scaledFrameDirty_ = true;
         updateTargetRect();
         update();
     }
@@ -206,8 +207,12 @@ protected:
 private:
     void updateTargetRect()
     {
+        const auto previousTargetSize = targetRect_.size();
         if (!frame_ || frame_->isNull()) {
             targetRect_ = {};
+            if (!previousTargetSize.isEmpty()) {
+                scaledFrameDirty_ = true;
+            }
             return;
         }
 
@@ -216,6 +221,37 @@ private:
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
             targetSize);
+        if (targetRect_.size() != previousTargetSize) {
+            scaledFrameDirty_ = true;
+        }
+    }
+
+    void ensureScaledFrame()
+    {
+        if (!frame_ || frame_->isNull() || targetRect_.isEmpty()) {
+            scaledFrame_ = {};
+            return;
+        }
+
+        const auto targetSize = targetRect_.size();
+        if (targetSize == frame_->size()) {
+            scaledFrame_ = {};
+            scaledFrameDirty_ = false;
+            return;
+        }
+
+        if (!scaledFrameDirty_ && scaledFrame_.size() == targetSize) {
+            return;
+        }
+
+        if (scaledFrame_.size() != targetSize) {
+            scaledFrame_ = QImage(targetSize, QImage::Format_RGB32);
+        }
+
+        QPainter scaler(&scaledFrame_);
+        scaler.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        scaler.drawImage(QRect(QPoint(0, 0), targetSize), *frame_);
+        scaledFrameDirty_ = false;
     }
 
     void paintFrame(QPainter &painter)
@@ -226,17 +262,21 @@ private:
             return;
         }
 
+        ensureScaledFrame();
         painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_->size()) {
-            painter.drawImage(targetRect_.topLeft(), *frame_);
-        } else {
-            painter.drawImage(targetRect_, *frame_);
+        if (!scaledFrame_.isNull()) {
+            painter.drawImage(targetRect_.topLeft(), scaledFrame_);
+            return;
         }
+
+        painter.drawImage(targetRect_.topLeft(), *frame_);
     }
 
     capture::FrameHandle frame_;
+    QImage scaledFrame_;
     QRect targetRect_;
     int paintCount_ = 0;
+    bool scaledFrameDirty_ = true;
 };
 
 class GpuFrameRenderer final : public QOpenGLWidget, protected QOpenGLFunctions, public FrameRenderer {
