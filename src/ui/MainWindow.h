@@ -33,12 +33,14 @@ private:
     void buildStoppedState();
     void startPlayback();
     void showConnectingState();
+    void showStoppingState();
     void showPlaybackState(QImage firstFrame = {});
     void updateVideoFrame(QImage frame);
     void updateStatsOverlay();
     QString buildStatsOverlayText() const;
     void stopPlayback();
     void stopPlaybackAsync();
+    void finishPlaybackStopped();
     void preconfigureSelectedFormat(bool force = false);
     void showPlaybackControls();
     void hidePlaybackControls();
@@ -62,6 +64,7 @@ private:
     capture::VideoTelemetrySnapshot latestTelemetry_;
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
+    bool playbackStopping_ = false;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     std::unique_ptr<ScreenInhibitor> screenInhibitor_;
     QThread *captureThread_ = nullptr;

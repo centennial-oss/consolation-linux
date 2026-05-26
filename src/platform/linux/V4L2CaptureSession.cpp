@@ -21,6 +21,7 @@ namespace {
 
 constexpr size_t rgbxFramePoolSize = 6;
 constexpr qint64 telemetryWindowNs = 500'000'000;
+constexpr int maxFramesPerNotifierActivation = 4;
 
 qint64 monotonicNs()
 {
@@ -145,19 +146,25 @@ bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const captu
 void V4L2CaptureSession::stop()
 {
     if (notifier_ != nullptr) {
+        emit logMessage(QStringLiteral("V4L2 stop disabling socket notifier"));
         notifier_->setEnabled(false);
-        notifier_->deleteLater();
+        delete notifier_;
         notifier_ = nullptr;
     }
 
     if (fd_ >= 0 && streaming_) {
+        emit logMessage(QStringLiteral("V4L2 stopping stream with VIDIOC_STREAMOFF"));
         v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        xioctl(fd_, VIDIOC_STREAMOFF, &type);
+        if (xioctl(fd_, VIDIOC_STREAMOFF, &type) != 0) {
+            emit logMessage(QStringLiteral("V4L2 STREAMOFF failed during stop: %1")
+                                .arg(QString::fromLocal8Bit(std::strerror(errno))));
+        }
         streaming_ = false;
     }
 
     cleanupBuffers();
     closeDevice();
+    emit logMessage(QStringLiteral("V4L2 stop complete"));
 }
 
 bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format)
@@ -355,6 +362,7 @@ bool V4L2CaptureSession::queueBuffers()
 
 void V4L2CaptureSession::handleReadyRead()
 {
+    auto framesProcessed = 0;
     while (true) {
         v4l2_buffer buffer {};
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -385,6 +393,11 @@ void V4L2CaptureSession::handleReadyRead()
         if (xioctl(fd_, VIDIOC_QBUF, &buffer) != 0) {
             emit failed(QStringLiteral("Could not requeue capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
             stop();
+            return;
+        }
+
+        ++framesProcessed;
+        if (framesProcessed >= maxFramesPerNotifierActivation) {
             return;
         }
     }

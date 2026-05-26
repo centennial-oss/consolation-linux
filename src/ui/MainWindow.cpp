@@ -821,6 +821,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 void MainWindow::buildStoppedState()
 {
+    playbackStopping_ = false;
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
@@ -1004,6 +1005,10 @@ void MainWindow::buildStoppedState()
 
 void MainWindow::startPlayback()
 {
+    if (playbackStopping_) {
+        return;
+    }
+
     showConnectingState();
     inhibitScreenSaver();
 
@@ -1140,6 +1145,35 @@ void MainWindow::showConnectingState()
     setCentralWidget(root);
 }
 
+void MainWindow::showStoppingState()
+{
+    playbackControls_.clear();
+    statsOverlay_.clear();
+    videoSurface_.clear();
+    latestTelemetry_ = {};
+    uiFps_ = 0.0;
+    paintFps_ = 0.0;
+    if (statsOverlayTimer_ != nullptr) {
+        statsOverlayTimer_->stop();
+    }
+    if (controlsHideTimer_ != nullptr) {
+        controlsHideTimer_->stop();
+    }
+
+    auto *root = new QWidget(this);
+    root->setStyleSheet(QStringLiteral("background-color: black;"));
+
+    auto *layout = new QVBoxLayout(root);
+    layout->setContentsMargins(24, 24, 24, 24);
+
+    auto *label = new QLabel(QStringLiteral("Stopping Playback..."), root);
+    label->setAlignment(Qt::AlignCenter);
+    label->setStyleSheet(QStringLiteral("color: #808080; font-size: 32px; font-weight: 500;"));
+
+    layout->addWidget(label, 1);
+    setCentralWidget(root);
+}
+
 void MainWindow::showPlaybackState(QImage firstFrame)
 {
     auto *root = new QWidget(this);
@@ -1197,7 +1231,10 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     auto *zoomSlider = makePlaybackSlider(controls);
     zoomSlider->setValue(0);
 
-    connect(powerButton, &QPushButton::clicked, this, [this]() { stopPlaybackAsync(); });
+    connect(powerButton, &QPushButton::clicked, this, [this, powerButton]() {
+        powerButton->setEnabled(false);
+        stopPlaybackAsync();
+    });
     connect(settingsButton, &QPushButton::clicked, this, [this]() { showSettingsDialog(); });
     connect(volumeSlider, &QSlider::valueChanged, this, [this](const int value) {
         settings_.setVolumePercent(value);
@@ -1357,6 +1394,7 @@ void MainWindow::preconfigureSelectedFormat(const bool force)
 void MainWindow::stopPlayback()
 {
     uninhibitScreenSaver();
+    playbackStopping_ = false;
 
     if (captureSession_) {
         if (captureThread_ && captureThread_->isRunning()) {
@@ -1383,6 +1421,10 @@ void MainWindow::stopPlayback()
 
 void MainWindow::stopPlaybackAsync()
 {
+    if (playbackStopping_) {
+        return;
+    }
+    playbackStopping_ = true;
     uninhibitScreenSaver();
 
     auto *session = captureSession_.release();
@@ -1394,12 +1436,16 @@ void MainWindow::stopPlaybackAsync()
     }
     statsOverlay_.clear();
     videoSurface_.clear();
-    buildStoppedState();
+    playbackControls_.clear();
+    showStoppingState();
 
     if (session == nullptr) {
         if (thread != nullptr) {
+            connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+            connect(thread, &QThread::finished, this, [this]() { finishPlaybackStopped(); });
             thread->quit();
-            thread->deleteLater();
+        } else {
+            finishPlaybackStopped();
         }
         return;
     }
@@ -1407,11 +1453,12 @@ void MainWindow::stopPlaybackAsync()
     QObject::disconnect(session, nullptr, this, nullptr);
     if (thread != nullptr && thread->isRunning()) {
         connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        connect(thread, &QThread::finished, this, [this]() { finishPlaybackStopped(); });
         QMetaObject::invokeMethod(
             session,
             [session, thread]() {
                 session->stop();
-                session->deleteLater();
+                delete session;
                 thread->quit();
             },
             Qt::QueuedConnection);
@@ -1423,6 +1470,15 @@ void MainWindow::stopPlaybackAsync()
     if (thread != nullptr) {
         delete thread;
     }
+    finishPlaybackStopped();
+}
+
+void MainWindow::finishPlaybackStopped()
+{
+    playbackStopping_ = false;
+    captureThread_ = nullptr;
+    captureSession_.reset();
+    buildStoppedState();
 }
 
 void MainWindow::showPlaybackControls()
