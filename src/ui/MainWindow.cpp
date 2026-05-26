@@ -15,6 +15,7 @@
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusReply>
+#include <QElapsedTimer>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -352,6 +353,10 @@ public:
         }
         std::cout.flush();
         rendererWidget_->lower();
+
+        presentTimer_.setSingleShot(true);
+        presentTimer_.setTimerType(Qt::PreciseTimer);
+        connect(&presentTimer_, &QTimer::timeout, this, [this]() { schedulePresent(); });
     }
 
     void setFrame(capture::FrameHandle frame)
@@ -362,10 +367,12 @@ public:
     void setPendingFrame(capture::FrameHandle frame)
     {
         pendingFrame_ = std::move(frame);
-        if (!renderQueued_) {
-            renderQueued_ = true;
-            QTimer::singleShot(16, this, [this]() { renderPendingFrame(); });
-        }
+        schedulePresent();
+    }
+
+    void setPresentCadenceMs(const int intervalMs)
+    {
+        targetPresentIntervalMs_ = std::max(1, intervalMs);
     }
 
     int takeUiFrameCount()
@@ -402,16 +409,27 @@ protected:
     }
 
 private:
-    void renderPendingFrame()
+    void schedulePresent()
     {
-        renderQueued_ = false;
         if (!pendingFrame_ || pendingFrame_->isNull()) {
             pendingFrame_.reset();
+            presentTimer_.stop();
             return;
         }
 
-        setFrame(std::move(pendingFrame_));
-        ++uiFrameCount_;
+        const auto elapsed = presentPacer_.isValid() ? presentPacer_.elapsed() : targetPresentIntervalMs_;
+        if (!presentPacer_.isValid() || elapsed >= targetPresentIntervalMs_) {
+            presentTimer_.stop();
+            presentPacer_.restart();
+            setFrame(std::move(pendingFrame_));
+            ++uiFrameCount_;
+            return;
+        }
+
+        if (!presentTimer_.isActive()) {
+            const auto remaining = targetPresentIntervalMs_ - static_cast<int>(elapsed);
+            presentTimer_.start(std::max(1, remaining));
+        }
     }
 
     void positionOverlays()
@@ -448,8 +466,18 @@ private:
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
-    bool renderQueued_ = false;
+    int targetPresentIntervalMs_ = 16;
+    QElapsedTimer presentPacer_;
+    QTimer presentTimer_;
 };
+
+int presentIntervalMsFromFps(const double fps)
+{
+    if (fps <= 0.0) {
+        return 16;
+    }
+    return std::max(1, static_cast<int>(std::lround(1000.0 / fps)));
+}
 
 namespace {
 
@@ -1346,6 +1374,9 @@ void MainWindow::startPlayback()
     });
     connect(captureSession_.get(), &capture::CaptureSession::telemetryReady, this, [this](const capture::VideoTelemetrySnapshot &snapshot) {
         latestTelemetry_ = snapshot;
+        if (videoSurface_ != nullptr && snapshot.configuredFps > 0.0) {
+            videoSurface_->setPresentCadenceMs(presentIntervalMsFromFps(snapshot.configuredFps));
+        }
     });
 
     const auto deviceSnapshot = selectedDevice_;
@@ -1458,6 +1489,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     layout->setSpacing(0);
 
     auto *video = new VideoSurface(root);
+    video->setPresentCadenceMs(presentIntervalMsFromFps(selectedFormat_.framesPerSecond));
     videoSurface_ = video;
 
     auto *statsOverlay = new QLabel(video);
