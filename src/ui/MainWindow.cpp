@@ -4,6 +4,7 @@
 #include "app/BuildInfo.h"
 #include "capture/CaptureBackendManager.h"
 #include "capture/CaptureSession.h"
+#include "platform/linux/PipeWireAudioSession.h"
 #include "ui/AppIcon.h"
 
 #include <QApplication>
@@ -1011,6 +1012,12 @@ void MainWindow::startPlayback()
 
     showConnectingState();
     inhibitScreenSaver();
+    if (selectedDevice_.backend == capture::CaptureBackend::V4L2) {
+        audioSession_ = std::make_unique<platform::linux::PipeWireAudioSession>();
+        if (!audioSession_->start(selectedDevice_, settings_.volumePercent())) {
+            audioSession_.reset();
+        }
+    }
 
     if (selectedDevice_.devicePath.startsWith(QStringLiteral("mock://"))) {
         QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
@@ -1238,6 +1245,9 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     connect(settingsButton, &QPushButton::clicked, this, [this]() { showSettingsDialog(); });
     connect(volumeSlider, &QSlider::valueChanged, this, [this](const int value) {
         settings_.setVolumePercent(value);
+        if (audioSession_) {
+            audioSession_->setVolumePercent(value);
+        }
         resetPlaybackControlsTimer();
     });
     connect(volumeSlider, &QSlider::valueChanged, volumeButton, [volumeButton, volumeOnIcon, volumeOffIcon](const int value) {
@@ -1395,6 +1405,10 @@ void MainWindow::stopPlayback()
 {
     uninhibitScreenSaver();
     playbackStopping_ = false;
+    if (audioSession_) {
+        audioSession_->stop();
+        audioSession_.reset();
+    }
 
     if (captureSession_) {
         if (captureThread_ && captureThread_->isRunning()) {
@@ -1426,6 +1440,10 @@ void MainWindow::stopPlaybackAsync()
     }
     playbackStopping_ = true;
     uninhibitScreenSaver();
+    if (audioSession_) {
+        audioSession_->stop();
+        audioSession_.reset();
+    }
 
     auto *session = captureSession_.release();
     auto *thread = captureThread_;

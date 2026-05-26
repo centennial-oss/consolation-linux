@@ -1,6 +1,6 @@
 # Developer Setup
 
-Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, CMake, and a C++ compiler. The capture path talks directly to V4L2 with Linux ioctls.
+Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, PipeWire, CMake, and a C++ compiler. The video capture path talks directly to V4L2 with Linux ioctls; audio capture/playback uses PipeWire.
 
 ## Fedora / Asahi Linux
 
@@ -11,6 +11,7 @@ sudo dnf install \
   cmake \
   gcc-c++ \
   ninja-build \
+  pipewire-devel \
   qt6-qtbase-devel \
   qt6-qtsvg-devel
 ```
@@ -27,6 +28,8 @@ Fedora 44 ships a newer Qt than Ubuntu 24.04. Use the `fedora-44` preset for loc
 
 Qt OpenGL Widgets is provided by `qt6-qtbase-devel` on Fedora, so no separate OpenGL Widgets development package is needed.
 
+During audio source matching work, set `CONSOLATION_PIPEWIRE_AUDIO_SOURCE` to a PipeWire source node name or object serial to force the capture stream to a specific audio source.
+
 ## Ubuntu 24.04
 
 Install the dependencies needed to configure, build, and test the app:
@@ -36,6 +39,7 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
+  libpipewire-0.3-dev \
   ninja-build \
   qt6-base-dev \
   qt6-base-dev-tools \
@@ -65,6 +69,7 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
+  libpipewire-0.3-dev \
   ninja-build \
   qt6-base-dev \
   qt6-base-dev-tools \

@@ -13,6 +13,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 
 qt_standard_project_setup()
 
@@ -30,6 +32,9 @@ configure_file(
 )
 
 add_library(consolation_core STATIC
+    src/audio/AudioRingBuffer.cpp
+    src/audio/AudioRingBuffer.h
+    src/audio/AudioSession.h
     src/app/BuildInfo.h
     src/capture/CaptureBackendManager.cpp
     src/capture/CaptureBackendManager.h
@@ -39,6 +44,8 @@ add_library(consolation_core STATIC
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp
     src/platform/linux/V4L2DeviceDiscovery.h
+    src/platform/linux/PipeWireAudioSession.cpp
+    src/platform/linux/PipeWireAudioSession.h
     src/settings/AppSettings.cpp
     src/settings/AppSettings.h
 )
@@ -56,6 +63,7 @@ target_link_libraries(consolation_core
         Qt6::Core
         Qt6::Gui
     PRIVATE
+        PkgConfig::PIPEWIRE
         yuv
 )
 
@@ -76,6 +84,7 @@ target_link_libraries(consolation
         Qt6::OpenGLWidgets
         Qt6::Svg
         Qt6::Widgets
+        PkgConfig::PIPEWIRE
 )
 
 set_target_properties(consolation PROPERTIES
@@ -99,13 +108,13 @@ set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "libqt6core6t64 | libqt6core6, libqt6dbus6t64 | libqt6dbus6, libqt6gui6t64 | libqt6gui6, libqt6openglwidgets6, libqt6svg6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
+    "libpipewire-0.3-0, libqt6core6t64 | libqt6core6, libqt6dbus6t64 | libqt6dbus6, libqt6gui6t64 | libqt6gui6, libqt6openglwidgets6, libqt6svg6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
 )
 
 set(CPACK_RPM_PACKAGE_LICENSE "Apache-2.0")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
 set(CPACK_RPM_PACKAGE_REQUIRES
-    "qt6-qtbase, qt6-qtbase-gui, qt6-qtsvg, qt6-qtwayland"
+    "pipewire-libs, qt6-qtbase, qt6-qtbase-gui, qt6-qtsvg, qt6-qtwayland"
 )
 
 include(CPack)

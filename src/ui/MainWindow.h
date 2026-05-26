@@ -16,8 +16,11 @@ class QLabel;
 class QThread;
 class QTimer;
 
-namespace consolation::ui {
+namespace consolation::audio {
+class AudioSession;
+}
 
+namespace consolation::ui {
 class ScreenInhibitor;
 class VideoSurface;
 
@@ -65,6 +68,7 @@ private:
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
     bool playbackStopping_ = false;
+    std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     std::unique_ptr<ScreenInhibitor> screenInhibitor_;
     QThread *captureThread_ = nullptr;
