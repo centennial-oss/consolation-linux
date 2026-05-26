@@ -1,0 +1,20 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="power.svg">../assets/icons/power.svg</file>
+        <file alias="settings.svg">../assets/icons/settings.svg</file>
+        <file alias="zoom-out.svg">../assets/icons/zoom-out.svg</file>
+        <file alias="zoom-in.svg">../assets/icons/zoom-in.svg</file>
+        <file alias="circle-play.svg">../assets/icons/circle-play.svg</file>
+        <file alias="square-stack.svg">../assets/icons/square-stack.svg</file>
+        <file alias="fullscreen.svg">../assets/icons/fullscreen.svg</file>
+        <file alias="volume-2.svg">../assets/icons/volume-2.svg</file>
+        <file alias="volume-off.svg">../assets/icons/volume-off.svg</file>
+        <file alias="usb.svg">../assets/icons/usb.svg</file>
+        <file alias="triangle-alert.svg">../assets/icons/triangle-alert.svg</file>
+        <file alias="shield.svg">../assets/icons/shield.svg</file>
+        <file alias="heart.svg">../assets/icons/heart.svg</file>
+        <file alias="file-text.svg">../assets/icons/file-text.svg</file>
+        <file alias="info.svg">../assets/icons/info.svg</file>
+        <file alias="circle-question-mark.svg">../assets/icons/circle-question-mark.svg</file>
+    </qresource>
+</RCC>
