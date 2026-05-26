@@ -1,6 +1,6 @@
 # Developer Setup
 
-Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, CMake, a C++ compiler, and libv4l2 for the capture path.
+Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, CMake, and a C++ compiler. The capture path talks directly to V4L2 with Linux ioctls.
 
 ## Fedora / Asahi Linux
 
@@ -10,7 +10,6 @@ Install the dependencies needed to configure, build, and test the app:
 sudo dnf install \
   cmake \
   gcc-c++ \
-  libv4l-devel \
   ninja-build \
   qt6-qtbase-devel \
   qt6-qtsvg-devel
@@ -37,7 +36,6 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
-  libv4l-dev \
   ninja-build \
   qt6-base-dev \
   qt6-base-dev-tools \
@@ -67,7 +65,6 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
-  libv4l-dev \
   ninja-build \
   qt6-base-dev \
   qt6-base-dev-tools \

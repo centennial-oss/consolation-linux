@@ -13,8 +13,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets)
-find_path(LIBV4L2_INCLUDE_DIR NAMES libv4l2.h REQUIRED)
-find_library(LIBV4L2_LIBRARY NAMES v4l2 REQUIRED)
 
 qt_standard_project_setup()
 
@@ -150,7 +148,4 @@ add_executable(v4l2_config_probe
 target_link_libraries(v4l2_config_probe
     PRIVATE
         Qt6::Core
-        ${LIBV4L2_LIBRARY}
 )
-
-target_include_directories(v4l2_config_probe PRIVATE ${LIBV4L2_INCLUDE_DIR})

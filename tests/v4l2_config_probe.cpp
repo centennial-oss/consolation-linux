@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
-#include <libv4l2.h>
 #include <linux/videodev2.h>
 #include <numeric>
 #include <sys/ioctl.h>
@@ -18,7 +17,7 @@ int xioctl(const int fd, const unsigned long request, void *arg)
 {
     int result = 0;
     do {
-        result = v4l2_ioctl(fd, request, arg);
+        result = ::ioctl(fd, request, arg);
     } while (result == -1 && errno == EINTR);
     return result;
 }
@@ -130,7 +129,7 @@ int main(int argc, char *argv[])
     const auto fps = parser.value(fpsOption).toDouble();
 
     out << "open " << device << "\n";
-    const int fd = v4l2_open(device.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    const int fd = ::open(device.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         out << "open: failed errno=" << errno << " " << errnoText() << "\n";
         return 2;
@@ -204,6 +203,6 @@ int main(int argc, char *argv[])
         out << "  accepted fps=" << fpsFromTimePerFrame(streamParm.parm.capture.timeperframe) << "\n";
     }
 
-    v4l2_close(fd);
+    ::close(fd);
     return 0;
 }
