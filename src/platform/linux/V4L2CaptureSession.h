@@ -72,6 +72,7 @@ private:
     qint64 telemetryPayloadTotalBytes_ = 0;
     int telemetryDmaFrameCount_ = 0;
     int telemetryCpuFrameCount_ = 0;
+    bool dmaBufHandleFailureLogged_ = false;
     QSocketNotifier *notifier_ = nullptr;
 };
 

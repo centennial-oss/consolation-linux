@@ -13,7 +13,7 @@ namespace consolation::platform::linux {
 // Imports NV12 dma-buf planes as EGLImages (R8 + RG88) and draws with a YUV shader.
 class Nv12DmaBufGl final : protected QOpenGLFunctions {
 public:
-    static constexpr int maxBufferSlots = 8;
+    static constexpr int maxBufferSlots = 64;
 
     bool initialize();
     void shutdown();

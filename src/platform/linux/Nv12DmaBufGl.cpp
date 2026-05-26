@@ -390,7 +390,8 @@ bool Nv12DmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, cons
 
     const auto display = static_cast<EGLDisplay>(eglDisplay_);
     const auto chromaOffset = static_cast<int>(static_cast<size_t>(frame->stride) * static_cast<size_t>(frame->height));
-    const auto chromaHeight = std::max(1, frame->height / 2);
+    const auto chromaWidth = std::max(1, (frame->width + 1) / 2);
+    const auto chromaHeight = std::max(1, (frame->height + 1) / 2);
 
     slot.eglImageY = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, 0, DRM_FORMAT_R8);
     if (slot.eglImageY == EGL_NO_IMAGE_KHR) {
@@ -400,7 +401,7 @@ bool Nv12DmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, cons
     slot.eglImageUv = createPlaneImage(
         display,
         frame->dmaFd,
-        frame->width,
+        chromaWidth,
         chromaHeight,
         frame->stride,
         chromaOffset,
@@ -409,7 +410,7 @@ bool Nv12DmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, cons
         slot.eglImageUv = createPlaneImage(
             display,
             frame->dmaFd,
-            frame->width,
+            chromaWidth,
             chromaHeight,
             frame->stride,
             chromaOffset,

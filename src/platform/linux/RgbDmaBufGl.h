@@ -13,7 +13,7 @@ namespace consolation::platform::linux {
 // Imports packed RGB/BGR dma-buf (24 bpp) as an EGLImage and draws with a textured quad.
 class RgbDmaBufGl final : protected QOpenGLFunctions {
 public:
-    static constexpr int maxBufferSlots = 8;
+    static constexpr int maxBufferSlots = 64;
 
     bool initialize();
     void shutdown();

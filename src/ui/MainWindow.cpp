@@ -168,11 +168,6 @@ public:
     }
     virtual int takePaintCount() = 0;
 
-    virtual void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints)
-    {
-        gpuPaints = 0;
-        cpuPaints = 0;
-    }
 };
 
 class CpuFrameRenderer final : public QWidget, public FrameRenderer {
@@ -202,19 +197,11 @@ public:
         return count;
     }
 
-    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints) override
-    {
-        gpuPaints = 0;
-        cpuPaints = cpuPaintCount_;
-        cpuPaintCount_ = 0;
-    }
-
 protected:
     void paintEvent(QPaintEvent *event) override
     {
         Q_UNUSED(event);
 
-        ++cpuPaintCount_;
         QPainter painter(this);
         paintFrame(painter);
     }
@@ -259,7 +246,6 @@ private:
     capture::FrameHandle frame_;
     QRect targetRect_;
     int paintCount_ = 0;
-    int cpuPaintCount_ = 0;
 };
 
 class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
@@ -368,14 +354,6 @@ public:
         return count;
     }
 
-    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints) override
-    {
-        gpuPaints = gpuPaintCount_;
-        cpuPaints = cpuPaintCount_;
-        gpuPaintCount_ = 0;
-        cpuPaintCount_ = 0;
-    }
-
 protected:
     void initializeGL() override
     {
@@ -421,7 +399,6 @@ protected:
         ++paintCount_;
         if (dmaFrame_) {
             if (tryPaintDmaFrame()) {
-                ++gpuPaintCount_;
                 return;
             }
             auto failedFrame = std::move(dmaFrame_);
@@ -433,9 +410,14 @@ protected:
             return;
         }
 
-        ++cpuPaintCount_;
-        QPainter painter(this);
-        paintFrame(painter);
+        if (frame_ && !frame_->isNull()) {
+            QPainter painter(this);
+            paintFrame(painter);
+            return;
+        }
+
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
     }
 
     void resizeEvent(QResizeEvent *event) override
@@ -545,8 +527,6 @@ private:
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     QRect targetRect_;
     int paintCount_ = 0;
-    int gpuPaintCount_ = 0;
-    int cpuPaintCount_ = 0;
 };
 
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
@@ -676,9 +656,12 @@ public:
         return renderer_->takePaintCount();
     }
 
-    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints)
+    void takePresentPathCounts(int &dmaPresents, int &cpuPresents)
     {
-        renderer_->takeDisplayPathCounts(gpuPaints, cpuPaints);
+        dmaPresents = presentDmaCount_;
+        cpuPresents = presentCpuCount_;
+        presentDmaCount_ = 0;
+        presentCpuCount_ = 0;
     }
 
     void releasePlaybackFrames()
@@ -711,6 +694,7 @@ private:
                 presentTimer_.stop();
                 presentPacer_.restart();
                 renderer_->setDmaFrame(std::move(pendingDmaFrame_));
+                ++presentDmaCount_;
                 ++uiFrameCount_;
                 return;
             }
@@ -733,6 +717,7 @@ private:
             presentTimer_.stop();
             presentPacer_.restart();
             setFrame(std::move(pendingFrame_));
+            ++presentCpuCount_;
             ++uiFrameCount_;
             return;
         }
@@ -780,6 +765,8 @@ private:
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
+    int presentDmaCount_ = 0;
+    int presentCpuCount_ = 0;
     int targetPresentIntervalMs_ = 16;
     QElapsedTimer presentPacer_;
     QTimer presentTimer_;
@@ -791,6 +778,23 @@ int presentIntervalMsFromFps(const double fps)
         return 16;
     }
     return std::max(1, static_cast<int>(std::lround(1000.0 / fps)));
+}
+
+QString resolveFrameMemoryLabel(const capture::VideoTelemetrySnapshot &telemetry)
+{
+    if (telemetry.dmaFramesInWindow > 0 && telemetry.cpuFramesInWindow == 0) {
+        return capture::frameMemoryLabel(capture::VideoFrameMemory::DmaBuf);
+    }
+    if (telemetry.cpuFramesInWindow > 0 && telemetry.dmaFramesInWindow == 0) {
+        return capture::frameMemoryLabel(capture::VideoFrameMemory::Mmap);
+    }
+    if (telemetry.dmaFramesInWindow > 0 && telemetry.cpuFramesInWindow > 0) {
+        return capture::frameMemoryLabel(capture::VideoFrameMemory::Mixed);
+    }
+    if (telemetry.dmaCapturePathEnabled) {
+        return capture::frameMemoryLabel(capture::VideoFrameMemory::DmaBuf);
+    }
+    return capture::frameMemoryLabel(telemetry.frameMemory);
 }
 
 namespace {
@@ -1709,9 +1713,14 @@ void MainWindow::startPlayback()
     const auto formatSnapshot = selectedFormat_;
     const auto dmaDisplayRequested = deviceSnapshot.backend == capture::CaptureBackend::V4L2 &&
         pixelFormatSupportsDmaDisplay(formatSnapshot.pixelFormat) && canCreateOpenGLContext();
+    if (auto *v4l2 = dynamic_cast<platform::linux::V4L2CaptureSession *>(captureSession_.get())) {
+        v4l2->setDmaBufDisplayRequested(dmaDisplayRequested);
+    }
     logCaptureStartup(
         "queuing CaptureSession::start",
-        QStringLiteral("%1 (%2)").arg(deviceSnapshot.devicePath, formatSnapshot.label));
+        QStringLiteral("%1 dma=%2").arg(
+            QStringLiteral("%1 (%2)").arg(deviceSnapshot.devicePath, formatSnapshot.label),
+            dmaDisplayRequested ? QStringLiteral("yes") : QStringLiteral("no")));
     QMetaObject::invokeMethod(
         captureSession_.get(),
         [this, deviceSnapshot, formatSnapshot, dmaDisplayRequested]() {
@@ -1955,17 +1964,25 @@ void MainWindow::updateStatsOverlay()
     uiFps_ = videoSurface_ ? videoSurface_->takeUiFrameCount() * 2.0 : 0.0;
     paintFps_ = videoSurface_ ? videoSurface_->takePaintCount() * 2.0 : 0.0;
 
-    int gpuPaints = 0;
-    int cpuPaints = 0;
+    int dmaPresents = 0;
+    int cpuPresents = 0;
     if (videoSurface_ != nullptr) {
-        videoSurface_->takeDisplayPathCounts(gpuPaints, cpuPaints);
+        videoSurface_->takePresentPathCounts(dmaPresents, cpuPresents);
     }
-    if (gpuPaints > 0 && cpuPaints == 0) {
+    if (latestTelemetry_.dmaFramesInWindow > 0 && latestTelemetry_.cpuFramesInWindow == 0) {
         displayPath_ = capture::VideoDisplayPath::Gpu;
-    } else if (cpuPaints > 0 && gpuPaints == 0) {
+    } else if (latestTelemetry_.cpuFramesInWindow > 0 && latestTelemetry_.dmaFramesInWindow == 0) {
         displayPath_ = capture::VideoDisplayPath::Cpu;
-    } else if (gpuPaints > 0 && cpuPaints > 0) {
+    } else if (latestTelemetry_.dmaFramesInWindow > 0 && latestTelemetry_.cpuFramesInWindow > 0) {
         displayPath_ = capture::VideoDisplayPath::Mixed;
+    } else if (dmaPresents > 0 && cpuPresents == 0) {
+        displayPath_ = capture::VideoDisplayPath::Gpu;
+    } else if (cpuPresents > 0 && dmaPresents == 0) {
+        displayPath_ = capture::VideoDisplayPath::Cpu;
+    } else if (dmaPresents > 0 && cpuPresents > 0) {
+        displayPath_ = capture::VideoDisplayPath::Mixed;
+    } else if (latestTelemetry_.dmaCapturePathEnabled && latestTelemetry_.dmaFramesInWindow > 0) {
+        displayPath_ = capture::VideoDisplayPath::Gpu;
     }
 
     refreshStatsOverlayCache();
@@ -2008,11 +2025,13 @@ QString MainWindow::formatStatsOverlayText() const
     const auto pixelFormat =
         pixelFourcc != 0 ? capture::fourCcToString(pixelFourcc) : selectedFormat_.pixelFormat;
 
+    const auto frameMemory = resolveFrameMemoryLabel(latestTelemetry_);
+
     QStringList fields {
         QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
         pixelFormat,
         QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
-        QStringLiteral("Mem:%1").arg(capture::frameMemoryLabel(latestTelemetry_.frameMemory)),
+        QStringLiteral("Mem:%1").arg(frameMemory),
         QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
 

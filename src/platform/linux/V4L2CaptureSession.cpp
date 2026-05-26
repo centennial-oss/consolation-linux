@@ -85,7 +85,10 @@ V4L2CaptureSession::~V4L2CaptureSession()
 
 bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const capture::CaptureFormat &format)
 {
+    const auto requestedDmaBufDisplay = dmaBufDisplayRequested_.load();
     stop();
+    dmaBufDisplayRequested_.store(requestedDmaBufDisplay);
+    dmaBufHandleFailureLogged_ = false;
 
     constexpr int maxAttempts = 3;
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
@@ -315,8 +318,10 @@ bool V4L2CaptureSession::allocateBuffers()
         emit failed(QStringLiteral("Could not allocate capture buffers: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
         return false;
     }
+    emit logMessage(QStringLiteral("V4L2 driver allocated %1 capture buffers").arg(request.count));
 
     buffers_.resize(request.count);
+    auto dmaBufExportSupportedForAllBuffers = true;
     for (auto index = 0U; index < request.count; ++index) {
         v4l2_buffer buffer {};
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -342,8 +347,14 @@ bool V4L2CaptureSession::allocateBuffers()
         exportRequest.plane = 0;
         if (xioctl(fd_, VIDIOC_EXPBUF, &exportRequest) == 0) {
             buffers_[index].dmaFd = exportRequest.fd;
-            dmaBufExportSupported_ = true;
+        } else {
+            dmaBufExportSupportedForAllBuffers = false;
         }
+    }
+
+    dmaBufExportSupported_ = dmaBufExportSupportedForAllBuffers;
+    if (!dmaBufExportSupported_) {
+        emit logMessage(QStringLiteral("V4L2 DMA-BUF export unavailable on one or more buffers; staying on mmap decode"));
     }
 
     if (dmaBufExportSupported_ && pixelFormatSupportsDmaBufDisplay(pixelFormat_)) {
@@ -426,6 +437,11 @@ void V4L2CaptureSession::handleReadyRead()
                 recordDecodedFrame(static_cast<int>(pending.bytesused), 0, true);
                 emit dmaFrameReady(std::move(dmaFrame));
                 return;
+            }
+            if (!dmaBufHandleFailureLogged_) {
+                dmaBufHandleFailureLogged_ = true;
+                emit logMessage(QStringLiteral(
+                    "V4L2 DMA-BUF handle creation failed; using mmap CPU decode for this session"));
             }
         }
 
@@ -693,6 +709,9 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
         ? static_cast<double>(telemetryPayloadTotalBytes_) / static_cast<double>(telemetryFrameCount_) / 1024.0
         : 0.0;
     snapshot.bufferCount = static_cast<int>(buffers_.size());
+    snapshot.dmaFramesInWindow = telemetryDmaFrameCount_;
+    snapshot.cpuFramesInWindow = telemetryCpuFrameCount_;
+    snapshot.dmaCapturePathEnabled = useDmaBufDisplayPath();
     if (telemetryDmaFrameCount_ > 0 && telemetryCpuFrameCount_ == 0) {
         snapshot.frameMemory = capture::VideoFrameMemory::DmaBuf;
     } else if (telemetryCpuFrameCount_ > 0 && telemetryDmaFrameCount_ == 0) {

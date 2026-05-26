@@ -61,6 +61,9 @@ struct VideoTelemetrySnapshot {
     double payloadAvgKb = 0.0;
     int bufferCount = 0;
     VideoFrameMemory frameMemory = VideoFrameMemory::Unknown;
+    int dmaFramesInWindow = 0;
+    int cpuFramesInWindow = 0;
+    bool dmaCapturePathEnabled = false;
 };
 
 inline QString frameMemoryLabel(const VideoFrameMemory memory)

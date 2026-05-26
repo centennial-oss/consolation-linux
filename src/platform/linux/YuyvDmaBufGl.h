@@ -13,7 +13,7 @@ namespace consolation::platform::linux {
 // Imports packed YUYV (YUY2) dma-buf as an EGLImage and draws with a YUV→RGB shader.
 class YuyvDmaBufGl final : protected QOpenGLFunctions {
 public:
-    static constexpr int maxBufferSlots = 8;
+    static constexpr int maxBufferSlots = 64;
 
     bool initialize();
     void shutdown();
