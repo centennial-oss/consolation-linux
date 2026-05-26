@@ -93,6 +93,7 @@ target_link_libraries(consolation
         consolation_core
         Qt6::DBus
         Qt6::Gui
+        Qt6::OpenGL
         Qt6::OpenGLWidgets
         Qt6::Svg
         Qt6::Widgets
