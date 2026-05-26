@@ -27,6 +27,7 @@ struct DmaBufFrame {
     int bytesUsed = 0;
     DmaBufLayout layout = DmaBufLayout::Unknown;
     bool flipVertical = false;
+    qint64 capturedAtNs = 0;
 };
 
 using DmaBufFrameHandle = std::shared_ptr<DmaBufFrame>;

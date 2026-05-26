@@ -130,7 +130,11 @@ int main(int argc, char *argv[])
             out << "[capture] " << message << "\n";
             out.flush();
         });
-        QObject::connect(attachedSession, &consolation::capture::CaptureSession::frameReady, &app, [&](const consolation::capture::FrameHandle &frame) {
+        QObject::connect(
+            attachedSession,
+            &consolation::capture::CaptureSession::frameReady,
+            &app,
+            [&](const consolation::capture::FrameHandle &frame, qint64) {
             if (!frame || frame->isNull()) {
                 return;
             }

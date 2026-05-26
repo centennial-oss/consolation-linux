@@ -32,6 +32,7 @@ private:
         void *start = nullptr;
         size_t length = 0;
         int dmaFd = -1;
+        qint64 capturedAtNs = 0;
     };
 
     void handleReadyRead();

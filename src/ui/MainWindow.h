@@ -39,7 +39,8 @@ private:
     void showConnectingState();
     void showStoppingState();
     void showPlaybackState(capture::FrameHandle firstFrame = {});
-    void updateVideoFrame(capture::FrameHandle frame);
+    void updateVideoFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0);
+    void recordPresentLatency(qint64 latencyNs);
     void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
     void updateStatsOverlay();
     void refreshStatsOverlayCache();
@@ -73,6 +74,10 @@ private:
     QString cachedStatsOverlayText_;
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
+    double presentLagAvgMs_ = 0.0;
+    qint64 presentLagWindowStartNs_ = 0;
+    int presentLagSampleCount_ = 0;
+    qint64 presentLagTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
     bool playbackStopping_ = false;
     std::unique_ptr<audio::AudioSession> audioSession_;

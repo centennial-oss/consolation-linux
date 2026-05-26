@@ -1,6 +1,7 @@
 #include "platform/linux/V4L2CaptureSession.h"
 
 #include "capture/FourCc.h"
+#include "capture/MonotonicClock.h"
 
 #include <QByteArray>
 #include <QPointer>
@@ -24,13 +25,6 @@ namespace consolation::platform::linux {
 namespace {
 
 constexpr qint64 telemetryWindowNs = 500'000'000;
-
-qint64 monotonicNs()
-{
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
 
 int xioctl(const int fd, const unsigned long request, void *arg)
 {
@@ -409,6 +403,10 @@ void V4L2CaptureSession::handleReadyRead()
             return;
         }
 
+        if (buffer.index < buffers_.size()) {
+            buffers_[buffer.index].capturedAtNs = capture::monotonicClockNs();
+        }
+
         if (havePending) {
             if (fd_ < 0) {
                 return; // stop() was called from within a frameReady handler; not an error
@@ -446,12 +444,13 @@ void V4L2CaptureSession::handleReadyRead()
             }
         }
 
-        const auto decodeStartNs = monotonicNs();
+        const auto capturedAtNs = buffers_[pending.index].capturedAtNs;
+        const auto decodeStartNs = capture::monotonicClockNs();
         auto frame = decodeFrame(buffers_[pending.index].start, static_cast<int>(pending.bytesused));
-        const auto decodeNs = monotonicNs() - decodeStartNs;
+        const auto decodeNs = capture::monotonicClockNs() - decodeStartNs;
         if (frame && !frame->isNull()) {
             recordDecodedFrame(static_cast<int>(pending.bytesused), decodeNs, false);
-            emit frameReady(std::move(frame));
+            emit frameReady(std::move(frame), capturedAtNs);
         }
     }
 
@@ -678,7 +677,7 @@ capture::FrameHandle V4L2CaptureSession::decodeRgb24(
 
 void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs, const bool dmaBufPath)
 {
-    const auto nowNs = monotonicNs();
+    const auto nowNs = capture::monotonicClockNs();
     if (telemetryWindowStartNs_ == 0) {
         telemetryWindowStartNs_ = nowNs;
     }
@@ -766,6 +765,7 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     payload->width = width_;
     payload->height = height_;
     payload->bytesUsed = static_cast<int>(buffer.bytesused);
+    payload->capturedAtNs = captureBuffer.capturedAtNs;
 
     if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
         payload->layout = capture::DmaBufLayout::Nv12;
@@ -821,20 +821,21 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
 
     const auto bufferIndex = frame->bufferIndex;
     const auto bytesUsed = frame->bytesUsed;
+    const auto capturedAtNs = frame->capturedAtNs;
 
     if (!streaming_ || fd_ < 0 || bufferIndex < 0 || bufferIndex >= static_cast<int>(buffers_.size())) {
         frame.reset();
         return;
     }
 
-    const auto decodeStartNs = monotonicNs();
+    const auto decodeStartNs = capture::monotonicClockNs();
     auto cpuFrame = decodeFrame(buffers_[static_cast<size_t>(bufferIndex)].start, bytesUsed);
-    const auto decodeNs = monotonicNs() - decodeStartNs;
+    const auto decodeNs = capture::monotonicClockNs() - decodeStartNs;
     frame.reset();
 
     if (cpuFrame && !cpuFrame->isNull()) {
         recordDecodedFrame(bytesUsed, decodeNs, false);
-        emit frameReady(std::move(cpuFrame));
+        emit frameReady(std::move(cpuFrame), capturedAtNs);
     }
 }
 

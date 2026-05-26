@@ -5,6 +5,7 @@
 #include "capture/CaptureBackendManager.h"
 #include "capture/CaptureSession.h"
 #include "capture/DmaBufFrame.h"
+#include "capture/MonotonicClock.h"
 #include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/YuyvDmaBufGl.h"
@@ -160,19 +161,37 @@ private:
 
 class FrameRenderer {
 public:
+    using FramePresentedHandler = std::function<void(qint64 latencyNs)>;
+
     virtual ~FrameRenderer() = default;
     virtual QWidget *widget() = 0;
     virtual void setFirstFramePaintedHandler(std::function<void()> handler)
     {
         Q_UNUSED(handler);
     }
-    virtual void setFrame(capture::FrameHandle frame) = 0;
+    virtual void setFramePresentedHandler(FramePresentedHandler handler)
+    {
+        framePresentedHandler_ = std::move(handler);
+    }
+    virtual void setFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0) = 0;
     virtual void setDmaFrame(capture::DmaBufFrameHandle frame)
     {
         Q_UNUSED(frame);
     }
     virtual int takePaintCount() = 0;
 
+protected:
+    void reportFramePresented()
+    {
+        if (!framePresentedHandler_ || displayCapturedAtNs_ <= 0) {
+            return;
+        }
+        framePresentedHandler_(capture::monotonicClockNs() - displayCapturedAtNs_);
+        displayCapturedAtNs_ = 0;
+    }
+
+    FramePresentedHandler framePresentedHandler_;
+    qint64 displayCapturedAtNs_ = 0;
 };
 
 class CpuFrameRenderer final : public QWidget, public FrameRenderer {
@@ -193,8 +212,9 @@ public:
         firstFramePaintedHandler_ = std::move(handler);
     }
 
-    void setFrame(capture::FrameHandle frame) override
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
     {
+        displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
         update();
@@ -251,6 +271,7 @@ private:
         } else {
             painter.drawImage(targetRect_, *frame_);
         }
+        reportFramePresented();
         notifyFirstFramePainted();
     }
 
@@ -355,7 +376,7 @@ public:
         firstFramePaintedHandler_ = std::move(handler);
     }
 
-    void setFrame(capture::FrameHandle frame) override
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
     {
         dmaFrame_.reset();
         boundDmaFrame_.reset();
@@ -371,6 +392,7 @@ public:
         if (i420Gl_.has_value()) {
             i420Gl_->releaseFrame();
         }
+        displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
         update();
@@ -380,6 +402,7 @@ public:
     {
         frame_.reset();
         boundDmaFrame_.reset();
+        displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
         dmaFrame_ = std::move(frame);
         updateTargetRect();
         update();
@@ -462,8 +485,7 @@ protected:
 
         if (frame_ && !frame_->isNull()) {
             QPainter painter(this);
-            paintFrame(painter);
-            notifyFirstFramePainted();
+            paintCpuFrame(painter);
             return;
         }
 
@@ -478,6 +500,24 @@ protected:
     }
 
 private:
+    void paintCpuFrame(QPainter &painter)
+    {
+        ++paintCount_;
+        painter.fillRect(rect(), Qt::black);
+        if (!frame_ || frame_->isNull()) {
+            return;
+        }
+
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
+        } else {
+            painter.drawImage(targetRect_, *frame_);
+        }
+        reportFramePresented();
+        notifyFirstFramePainted();
+    }
+
     void updateTargetRect()
     {
         QSize sourceSize;
@@ -495,21 +535,6 @@ private:
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
             targetSize);
-    }
-
-    void paintFrame(QPainter &painter)
-    {
-        painter.fillRect(rect(), Qt::black);
-        if (!frame_ || frame_->isNull()) {
-            return;
-        }
-
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_->size()) {
-            painter.drawImage(targetRect_.topLeft(), *frame_);
-        } else {
-            painter.drawImage(targetRect_, *frame_);
-        }
     }
 
     bool tryPaintDmaFrame()
@@ -538,6 +563,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             nv12Gl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
             notifyFirstFramePainted();
             return true;
         }
@@ -565,6 +591,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             rgbGl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
             notifyFirstFramePainted();
             return true;
         }
@@ -591,6 +618,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             yuyvGl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
             notifyFirstFramePainted();
             return true;
         }
@@ -618,6 +646,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             i420Gl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
             notifyFirstFramePainted();
             return true;
         }
@@ -709,20 +738,28 @@ public:
         std::cout.flush();
         rendererWidget_->lower();
         renderer_->setFirstFramePaintedHandler([this]() { hideStartupOverlay(); });
+        if (framePresentedHandler_) {
+            renderer_->setFramePresentedHandler(framePresentedHandler_);
+        }
 
         startupOverlay_ = new QLabel(QStringLiteral("Connecting to Capture Card..."), this);
         startupOverlay_->setAlignment(Qt::AlignCenter);
         startupOverlay_->setStyleSheet(QStringLiteral("color: #808080; background-color: black; font-size: 32px; font-weight: 500;"));
         startupOverlay_->hide();
 
-        presentTimer_.setSingleShot(true);
-        presentTimer_.setTimerType(Qt::PreciseTimer);
-        connect(&presentTimer_, &QTimer::timeout, this, [this]() { schedulePresent(); });
     }
 
-    void setFrame(capture::FrameHandle frame)
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
     {
-        renderer_->setFrame(std::move(frame));
+        renderer_->setFrame(std::move(frame), capturedAtNs);
+    }
+
+    void setFramePresentedHandler(FrameRenderer::FramePresentedHandler handler)
+    {
+        framePresentedHandler_ = std::move(handler);
+        if (renderer_ != nullptr) {
+            renderer_->setFramePresentedHandler(framePresentedHandler_);
+        }
     }
 
     void setStartupOverlayVisible(const bool visible)
@@ -736,9 +773,10 @@ public:
         }
     }
 
-    void setPendingFrame(capture::FrameHandle frame)
+    void setPendingFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
     {
         pendingDmaFrame_.reset();
+        pendingCapturedAtNs_ = capturedAtNs;
         pendingFrame_ = std::move(frame);
         schedulePresent();
     }
@@ -746,17 +784,9 @@ public:
     void setPendingDmaFrame(capture::DmaBufFrameHandle frame)
     {
         pendingFrame_.reset();
+        pendingCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
         pendingDmaFrame_ = std::move(frame);
         schedulePresent();
-    }
-
-    void setPresentCadenceFps(const double fps)
-    {
-        if (fps <= 0.0) {
-            targetPresentIntervalNs_ = 16'666'667LL;
-            return;
-        }
-        targetPresentIntervalNs_ = static_cast<qint64>(std::llround(1e9 / fps));
     }
 
     void setDmaGlFailedHandler(GpuFrameRenderer::DmaGlFailedHandler handler)
@@ -809,7 +839,6 @@ public:
 
     void releasePlaybackFrames()
     {
-        presentTimer_.stop();
         pendingDmaFrame_.reset();
         pendingFrame_.reset();
         if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
@@ -839,43 +868,21 @@ private:
     void schedulePresent()
     {
         if (pendingDmaFrame_) {
-            const auto elapsedNs = presentPacer_.isValid() ? presentPacer_.nsecsElapsed() : targetPresentIntervalNs_;
-            if (!presentPacer_.isValid() || elapsedNs >= targetPresentIntervalNs_) {
-                presentTimer_.stop();
-                presentPacer_.restart();
-                renderer_->setDmaFrame(std::move(pendingDmaFrame_));
-                ++presentDmaCount_;
-                ++uiFrameCount_;
-                return;
-            }
-
-            if (!presentTimer_.isActive()) {
-                const auto remainingMs = static_cast<int>((targetPresentIntervalNs_ - elapsedNs) / 1'000'000LL);
-                presentTimer_.start(std::max(1, remainingMs));
-            }
+            renderer_->setDmaFrame(std::move(pendingDmaFrame_));
+            ++presentDmaCount_;
+            ++uiFrameCount_;
             return;
         }
 
         if (!pendingFrame_ || pendingFrame_->isNull()) {
             pendingFrame_.reset();
-            presentTimer_.stop();
             return;
         }
 
-        const auto elapsedNs = presentPacer_.isValid() ? presentPacer_.nsecsElapsed() : targetPresentIntervalNs_;
-        if (!presentPacer_.isValid() || elapsedNs >= targetPresentIntervalNs_) {
-            presentTimer_.stop();
-            presentPacer_.restart();
-            setFrame(std::move(pendingFrame_));
-            ++presentCpuCount_;
-            ++uiFrameCount_;
-            return;
-        }
-
-        if (!presentTimer_.isActive()) {
-            const auto remainingMs = static_cast<int>((targetPresentIntervalNs_ - elapsedNs) / 1'000'000LL);
-            presentTimer_.start(std::max(1, remainingMs));
-        }
+        setFrame(std::move(pendingFrame_), pendingCapturedAtNs_);
+        pendingCapturedAtNs_ = 0;
+        ++presentCpuCount_;
+        ++uiFrameCount_;
     }
 
     void positionOverlays()
@@ -915,17 +922,16 @@ private:
     QWidget *rendererWidget_ = nullptr;
     GpuFrameRenderer::DmaGlFailedHandler dmaGlFailedHandler_;
     GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
+    FrameRenderer::FramePresentedHandler framePresentedHandler_;
     capture::FrameHandle pendingFrame_;
     capture::DmaBufFrameHandle pendingDmaFrame_;
+    qint64 pendingCapturedAtNs_ = 0;
     QPointer<QLabel> startupOverlay_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
     int presentDmaCount_ = 0;
     int presentCpuCount_ = 0;
-    qint64 targetPresentIntervalNs_ = 16'000'000LL;
-    QElapsedTimer presentPacer_;
-    QTimer presentTimer_;
 };
 
 
@@ -1821,19 +1827,23 @@ void MainWindow::startPlayback()
     captureSession_->moveToThread(captureThread_);
     logCaptureStartup("session moved to capture thread");
 
-    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](capture::FrameHandle frame) {
-        if (playbackStopping_) {
-            return;
-        }
-        if (!frame || frame->isNull()) {
-            return;
-        }
-        if (!videoSurface_) {
-            showPlaybackState(std::move(frame));
-            return;
-        }
-        updateVideoFrame(std::move(frame));
-    });
+    connect(
+        captureSession_.get(),
+        &capture::CaptureSession::frameReady,
+        this,
+        [this](capture::FrameHandle frame, const qint64 capturedAtNs) {
+            if (playbackStopping_) {
+                return;
+            }
+            if (!frame || frame->isNull()) {
+                return;
+            }
+            if (!videoSurface_) {
+                showPlaybackState(std::move(frame));
+                return;
+            }
+            updateVideoFrame(std::move(frame), capturedAtNs);
+        });
     connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
         if (playbackStopping_) {
             return;
@@ -1862,9 +1872,6 @@ void MainWindow::startPlayback()
     connect(captureSession_.get(), &capture::CaptureSession::telemetryReady, this, [this](const capture::VideoTelemetrySnapshot &snapshot) {
         latestTelemetry_ = snapshot;
         refreshStatsOverlayCache();
-        if (videoSurface_ != nullptr && snapshot.configuredFps > 0.0) {
-            videoSurface_->setPresentCadenceFps(snapshot.configuredFps);
-        }
     });
 
     const auto deviceSnapshot = selectedDevice_;
@@ -1991,9 +1998,9 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     layout->setSpacing(0);
 
     auto *video = new VideoSurface(root);
-    video->setPresentCadenceFps(selectedFormat_.framesPerSecond);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
+    video->setFramePresentedHandler([this](const qint64 latencyNs) { recordPresentLatency(latencyNs); });
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
             return;
@@ -2096,7 +2103,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     resetPlaybackControlsTimer();
 }
 
-void MainWindow::updateVideoFrame(capture::FrameHandle frame)
+void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 capturedAtNs)
 {
     if (playbackStopping_) {
         return;
@@ -2105,7 +2112,36 @@ void MainWindow::updateVideoFrame(capture::FrameHandle frame)
         return;
     }
 
-    videoSurface_->setPendingFrame(std::move(frame));
+    videoSurface_->setPendingFrame(std::move(frame), capturedAtNs);
+}
+
+void MainWindow::recordPresentLatency(const qint64 latencyNs)
+{
+    if (latencyNs <= 0) {
+        return;
+    }
+
+    constexpr qint64 windowNs = 500'000'000;
+    const auto nowNs = capture::monotonicClockNs();
+    if (presentLagWindowStartNs_ == 0) {
+        presentLagWindowStartNs_ = nowNs;
+    }
+
+    ++presentLagSampleCount_;
+    presentLagTotalNs_ += latencyNs;
+
+    const auto elapsedNs = nowNs - presentLagWindowStartNs_;
+    if (elapsedNs < windowNs) {
+        return;
+    }
+
+    presentLagAvgMs_ = presentLagSampleCount_ > 0
+        ? static_cast<double>(presentLagTotalNs_) / static_cast<double>(presentLagSampleCount_) / 1'000'000.0
+        : 0.0;
+    presentLagWindowStartNs_ = nowNs;
+    presentLagSampleCount_ = 0;
+    presentLagTotalNs_ = 0;
+    refreshStatsOverlayCache();
 }
 
 void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
@@ -2196,6 +2232,7 @@ QString MainWindow::formatStatsOverlayText() const
         QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
         pixelFormat,
         QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
+        QStringLiteral("Lag:%1").arg(QString::number(presentLagAvgMs_, 'f', 1)),
         QStringLiteral("Mem:%1").arg(frameMemory),
         QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
@@ -2336,6 +2373,10 @@ void MainWindow::stopPlayback()
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
+    presentLagAvgMs_ = 0.0;
+    presentLagWindowStartNs_ = 0;
+    presentLagSampleCount_ = 0;
+    presentLagTotalNs_ = 0;
     statsOverlay_.clear();
     videoSurface_.clear();
     buildStoppedState();
