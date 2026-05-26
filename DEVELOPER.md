@@ -1,6 +1,6 @@
 # Developer Setup
 
-Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt SVG, CMake, a C++ compiler, and libv4l2 for the capture path.
+Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, CMake, a C++ compiler, and libv4l2 for the capture path.
 
 ## Fedora / Asahi Linux
 
@@ -25,6 +25,8 @@ ctest --preset fedora-44
 ```
 
 Fedora 44 ships a newer Qt than Ubuntu 24.04. Use the `fedora-44` preset for local Fedora builds so generated files stay in `build-fedora-44`.
+
+Qt OpenGL Widgets is provided by `qt6-qtbase-devel` on Fedora, so no separate OpenGL Widgets development package is needed.
 
 ## Ubuntu 24.04
 
@@ -52,6 +54,8 @@ ctest --preset ubuntu-2404
 
 Ubuntu 24.04 ships Qt 6.4.2. Build release binaries for Ubuntu 24.04 inside an Ubuntu 24.04 environment so the executable does not require newer Qt symbol versions from Fedora or a local Qt install.
 
+Qt OpenGL Widgets is provided by `qt6-base-dev` on Ubuntu, so no separate OpenGL Widgets development package is needed.
+
 ## Raspberry Pi OS Trixie
 
 Raspberry Pi OS Trixie is based on Debian 13 Trixie. Debian Trixie ships `qt6-base-dev` 6.8.2, which is compatible with Consolation's Qt 6.4 minimum.
@@ -77,6 +81,8 @@ cmake --preset rpi-os-trixie
 cmake --build --preset rpi-os-trixie
 ctest --preset rpi-os-trixie
 ```
+
+Qt OpenGL Widgets is provided by `qt6-base-dev` on Debian/Raspberry Pi OS, so no separate OpenGL Widgets development package is needed.
 
 ALSA and MJPEG decoder work use these additional development packages:
 

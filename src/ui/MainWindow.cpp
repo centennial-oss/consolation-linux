@@ -27,6 +27,9 @@
 #include <QLinearGradient>
 #include <QMessageBox>
 #include <QMetaType>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QOpenGLWidget>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
@@ -138,6 +141,189 @@ private:
     uint cookie_ = 0;
 };
 
+class FrameRenderer {
+public:
+    virtual ~FrameRenderer() = default;
+    virtual QWidget *widget() = 0;
+    virtual void setFrame(QImage frame) = 0;
+    virtual int takePaintCount() = 0;
+};
+
+class CpuFrameRenderer final : public QWidget, public FrameRenderer {
+public:
+    explicit CpuFrameRenderer(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setAutoFillBackground(false);
+    }
+
+    QWidget *widget() override
+    {
+        return this;
+    }
+
+    void setFrame(QImage frame) override
+    {
+        frame_ = std::move(frame);
+        updateTargetRect();
+        update();
+    }
+
+    int takePaintCount() override
+    {
+        const auto count = paintCount_;
+        paintCount_ = 0;
+        return count;
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        paintFrame(painter);
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        updateTargetRect();
+    }
+
+private:
+    void updateTargetRect()
+    {
+        if (frame_.isNull()) {
+            targetRect_ = {};
+            return;
+        }
+
+        auto targetSize = frame_.size();
+        targetSize.scale(size(), Qt::KeepAspectRatio);
+        targetRect_ = QRect(
+            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
+            targetSize);
+    }
+
+    void paintFrame(QPainter &painter)
+    {
+        ++paintCount_;
+        painter.fillRect(rect(), Qt::black);
+        if (frame_.isNull()) {
+            return;
+        }
+
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (targetRect_.size() == frame_.size()) {
+            painter.drawImage(targetRect_.topLeft(), frame_);
+        } else {
+            painter.drawImage(targetRect_, frame_);
+        }
+    }
+
+    QImage frame_;
+    QRect targetRect_;
+    int paintCount_ = 0;
+};
+
+class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
+public:
+    explicit GpuFrameRenderer(QWidget *parent = nullptr)
+        : QOpenGLWidget(parent)
+    {
+        setAutoFillBackground(false);
+    }
+
+    QWidget *widget() override
+    {
+        return this;
+    }
+
+    void setFrame(QImage frame) override
+    {
+        frame_ = std::move(frame);
+        updateTargetRect();
+        update();
+    }
+
+    int takePaintCount() override
+    {
+        const auto count = paintCount_;
+        paintCount_ = 0;
+        return count;
+    }
+
+protected:
+    void paintGL() override
+    {
+        QPainter painter(this);
+        paintFrame(painter);
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QOpenGLWidget::resizeEvent(event);
+        updateTargetRect();
+    }
+
+private:
+    void updateTargetRect()
+    {
+        if (frame_.isNull()) {
+            targetRect_ = {};
+            return;
+        }
+
+        auto targetSize = frame_.size();
+        targetSize.scale(size(), Qt::KeepAspectRatio);
+        targetRect_ = QRect(
+            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
+            targetSize);
+    }
+
+    void paintFrame(QPainter &painter)
+    {
+        ++paintCount_;
+        painter.fillRect(rect(), Qt::black);
+        if (frame_.isNull()) {
+            return;
+        }
+
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (targetRect_.size() == frame_.size()) {
+            painter.drawImage(targetRect_.topLeft(), frame_);
+        } else {
+            painter.drawImage(targetRect_, frame_);
+        }
+    }
+
+    QImage frame_;
+    QRect targetRect_;
+    int paintCount_ = 0;
+};
+
+bool canCreateOpenGLContext()
+{
+    QOpenGLContext context;
+    if (!context.create()) {
+        return false;
+    }
+
+    QOffscreenSurface surface;
+    surface.setFormat(context.format());
+    surface.create();
+    if (!surface.isValid()) {
+        return false;
+    }
+
+    const auto madeCurrent = context.makeCurrent(&surface);
+    if (madeCurrent) {
+        context.doneCurrent();
+    }
+    return madeCurrent;
+}
+
 class VideoSurface final : public QWidget {
 public:
     explicit VideoSurface(QWidget *parent = nullptr)
@@ -145,13 +331,25 @@ public:
     {
         setAutoFillBackground(false);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+        if (canCreateOpenGLContext()) {
+            auto *renderer = new GpuFrameRenderer(this);
+            renderer_ = renderer;
+            rendererWidget_ = renderer;
+            std::cout << "[MainWindow capture] video renderer: OpenGL" << std::endl;
+        } else {
+            auto *renderer = new CpuFrameRenderer(this);
+            renderer_ = renderer;
+            rendererWidget_ = renderer;
+            std::cout << "[MainWindow capture] video renderer: CPU fallback" << std::endl;
+        }
+        std::cout.flush();
+        rendererWidget_->lower();
     }
 
     void setFrame(QImage frame)
     {
-        frame_ = std::move(frame);
-        updateTargetRect();
-        update();
+        renderer_->setFrame(std::move(frame));
     }
 
     void setPendingFrame(QImage frame)
@@ -184,53 +382,19 @@ public:
 
     int takePaintCount()
     {
-        const auto count = paintCount_;
-        paintCount_ = 0;
-        return count;
+        return renderer_->takePaintCount();
     }
 
 protected:
-    void paintEvent(QPaintEvent *event) override
-    {
-        Q_UNUSED(event);
-
-        QPainter painter(this);
-        ++paintCount_;
-        painter.fillRect(rect(), Qt::black);
-        if (frame_.isNull()) {
-            return;
-        }
-
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_.size()) {
-            painter.drawImage(targetRect_.topLeft(), frame_);
-        } else {
-            painter.drawImage(targetRect_, frame_);
-        }
-    }
-
     void resizeEvent(QResizeEvent *event) override
     {
         QWidget::resizeEvent(event);
-        updateTargetRect();
+        rendererWidget_->setGeometry(rect());
+        rendererWidget_->lower();
         positionOverlays();
     }
 
 private:
-    void updateTargetRect()
-    {
-        if (frame_.isNull()) {
-            targetRect_ = {};
-            return;
-        }
-
-        auto targetSize = frame_.size();
-        targetSize.scale(size(), Qt::KeepAspectRatio);
-        targetRect_ = QRect(
-            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
-            targetSize);
-    }
-
     void renderPendingFrame()
     {
         renderQueued_ = false;
@@ -271,12 +435,11 @@ private:
         }
     }
 
-    QImage frame_;
+    FrameRenderer *renderer_ = nullptr;
+    QWidget *rendererWidget_ = nullptr;
     QImage pendingFrame_;
-    QRect targetRect_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
-    int paintCount_ = 0;
     int uiFrameCount_ = 0;
     bool renderQueued_ = false;
 };
