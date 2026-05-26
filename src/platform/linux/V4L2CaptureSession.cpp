@@ -795,7 +795,7 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     return capture::DmaBufFrameHandle(payload, [session](capture::DmaBufFrame *frame) {
         if (frame != nullptr) {
             const auto index = frame->bufferIndex;
-            if (session != nullptr && session->streaming_ && session->fd_ >= 0) {
+            if (session != nullptr) {
                 QMetaObject::invokeMethod(
                     session,
                     "requeueCaptureBuffer",

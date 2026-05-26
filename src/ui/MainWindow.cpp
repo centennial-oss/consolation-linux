@@ -2363,17 +2363,21 @@ void MainWindow::stopPlaybackAsync()
         videoSurface_->releasePlaybackFrames();
     }
     showStoppingState();
-    if (captureSession_ && captureThread_ && captureThread_->isRunning()) {
-        QMetaObject::invokeMethod(captureSession_.get(), []() {}, Qt::BlockingQueuedConnection);
-    }
 
     auto *session = captureSession_.release();
     auto *thread = captureThread_;
-    captureThread_ = nullptr;
 
     if (session != nullptr) {
         QObject::disconnect(session, nullptr, this, nullptr);
         if (thread != nullptr && thread->isRunning()) {
+            connect(thread, &QThread::finished, this, [this, thread]() {
+                if (captureThread_ == thread) {
+                    captureThread_ = nullptr;
+                }
+                thread->wait();
+                delete thread;
+                finishPlaybackStopped();
+            });
             QMetaObject::invokeMethod(
                 session,
                 [session, thread]() {
@@ -2381,19 +2385,24 @@ void MainWindow::stopPlaybackAsync()
                     delete session;
                     thread->quit();
                 },
-                Qt::BlockingQueuedConnection);
-            thread->wait();
-            delete thread;
+                Qt::QueuedConnection);
+            return;
         } else {
             session->stop();
             delete session;
             if (thread != nullptr) {
+                if (captureThread_ == thread) {
+                    captureThread_ = nullptr;
+                }
                 delete thread;
             }
         }
     } else if (thread != nullptr) {
         thread->quit();
         thread->wait();
+        if (captureThread_ == thread) {
+            captureThread_ = nullptr;
+        }
         delete thread;
     }
 
