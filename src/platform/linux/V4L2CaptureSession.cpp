@@ -3,6 +3,7 @@
 #include "capture/FourCc.h"
 
 #include <QByteArray>
+#include <QPointer>
 #include <libyuv/convert.h>
 #include <libyuv/convert_argb.h>
 
@@ -783,12 +784,13 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
         return {};
     }
 
-    return capture::DmaBufFrameHandle(payload, [this](capture::DmaBufFrame *frame) {
+    const QPointer<V4L2CaptureSession> session(this);
+    return capture::DmaBufFrameHandle(payload, [session](capture::DmaBufFrame *frame) {
         if (frame != nullptr) {
             const auto index = frame->bufferIndex;
-            if (streaming_ && fd_ >= 0) {
+            if (session != nullptr && session->streaming_ && session->fd_ >= 0) {
                 QMetaObject::invokeMethod(
-                    this,
+                    session,
                     "requeueCaptureBuffer",
                     Qt::QueuedConnection,
                     Q_ARG(int, index));

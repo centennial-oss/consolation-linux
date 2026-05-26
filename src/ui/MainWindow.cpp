@@ -161,6 +161,10 @@ class FrameRenderer {
 public:
     virtual ~FrameRenderer() = default;
     virtual QWidget *widget() = 0;
+    virtual void setFirstFramePaintedHandler(std::function<void()> handler)
+    {
+        Q_UNUSED(handler);
+    }
     virtual void setFrame(capture::FrameHandle frame) = 0;
     virtual void setDmaFrame(capture::DmaBufFrameHandle frame)
     {
@@ -181,6 +185,11 @@ public:
     QWidget *widget() override
     {
         return this;
+    }
+
+    void setFirstFramePaintedHandler(std::function<void()> handler) override
+    {
+        firstFramePaintedHandler_ = std::move(handler);
     }
 
     void setFrame(capture::FrameHandle frame) override
@@ -241,10 +250,22 @@ private:
         } else {
             painter.drawImage(targetRect_, *frame_);
         }
+        notifyFirstFramePainted();
+    }
+
+    void notifyFirstFramePainted()
+    {
+        if (firstFramePainted_ || !firstFramePaintedHandler_) {
+            return;
+        }
+        firstFramePainted_ = true;
+        firstFramePaintedHandler_();
     }
 
     capture::FrameHandle frame_;
     QRect targetRect_;
+    std::function<void()> firstFramePaintedHandler_;
+    bool firstFramePainted_ = false;
     int paintCount_ = 0;
 };
 
@@ -318,6 +339,11 @@ public:
     QWidget *widget() override
     {
         return this;
+    }
+
+    void setFirstFramePaintedHandler(std::function<void()> handler) override
+    {
+        firstFramePaintedHandler_ = std::move(handler);
     }
 
     void setFrame(capture::FrameHandle frame) override
@@ -413,6 +439,7 @@ protected:
         if (frame_ && !frame_->isNull()) {
             QPainter painter(this);
             paintFrame(painter);
+            notifyFirstFramePainted();
             return;
         }
 
@@ -487,6 +514,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             nv12Gl_->draw(size(), targetRect_, dpr);
+            notifyFirstFramePainted();
             return true;
         }
 
@@ -513,6 +541,7 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             rgbGl_->draw(size(), targetRect_, dpr);
+            notifyFirstFramePainted();
             return true;
         }
 
@@ -538,10 +567,20 @@ private:
                 boundDmaFrame_ = dmaFrame_;
             }
             yuyvGl_->draw(size(), targetRect_, dpr);
+            notifyFirstFramePainted();
             return true;
         }
 
         return false;
+    }
+
+    void notifyFirstFramePainted()
+    {
+        if (firstFramePainted_ || !firstFramePaintedHandler_) {
+            return;
+        }
+        firstFramePainted_ = true;
+        firstFramePaintedHandler_();
     }
 
     std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
@@ -552,7 +591,9 @@ private:
     capture::DmaBufFrameHandle boundDmaFrame_;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
+    std::function<void()> firstFramePaintedHandler_;
     QRect targetRect_;
+    bool firstFramePainted_ = false;
     int paintCount_ = 0;
 };
 
@@ -613,6 +654,12 @@ public:
         }
         std::cout.flush();
         rendererWidget_->lower();
+        renderer_->setFirstFramePaintedHandler([this]() { hideStartupOverlay(); });
+
+        startupOverlay_ = new QLabel(QStringLiteral("Connecting to Capture Card..."), this);
+        startupOverlay_->setAlignment(Qt::AlignCenter);
+        startupOverlay_->setStyleSheet(QStringLiteral("color: #808080; background-color: black; font-size: 32px; font-weight: 500;"));
+        startupOverlay_->hide();
 
         presentTimer_.setSingleShot(true);
         presentTimer_.setTimerType(Qt::PreciseTimer);
@@ -622,6 +669,17 @@ public:
     void setFrame(capture::FrameHandle frame)
     {
         renderer_->setFrame(std::move(frame));
+    }
+
+    void setStartupOverlayVisible(const bool visible)
+    {
+        if (!startupOverlay_) {
+            return;
+        }
+        startupOverlay_->setVisible(visible);
+        if (visible) {
+            startupOverlay_->raise();
+        }
     }
 
     void setPendingFrame(capture::FrameHandle frame)
@@ -713,6 +771,13 @@ protected:
     }
 
 private:
+    void hideStartupOverlay()
+    {
+        if (startupOverlay_) {
+            startupOverlay_->hide();
+        }
+    }
+
     void schedulePresent()
     {
         if (pendingDmaFrame_) {
@@ -781,6 +846,11 @@ private:
                 overlaySize.height());
             controlsOverlay_->raise();
         }
+
+        if (startupOverlay_ != nullptr) {
+            startupOverlay_->setGeometry(rect());
+            startupOverlay_->raise();
+        }
     }
 
     FrameRenderer *renderer_ = nullptr;
@@ -789,6 +859,7 @@ private:
     GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     capture::FrameHandle pendingFrame_;
     capture::DmaBufFrameHandle pendingDmaFrame_;
+    QPointer<QLabel> startupOverlay_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
@@ -1700,6 +1771,9 @@ void MainWindow::startPlayback()
     logCaptureStartup("session moved to capture thread");
 
     connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](capture::FrameHandle frame) {
+        if (playbackStopping_) {
+            return;
+        }
         if (!frame || frame->isNull()) {
             return;
         }
@@ -1710,6 +1784,9 @@ void MainWindow::startPlayback()
         updateVideoFrame(std::move(frame));
     });
     connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
+        if (playbackStopping_) {
+            return;
+        }
         if (!frame) {
             return;
         }
@@ -1719,6 +1796,9 @@ void MainWindow::startPlayback()
         updateVideoDmaFrame(std::move(frame));
     });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
+        if (playbackStopping_) {
+            return;
+        }
         logCaptureStartup("failed", message);
         if (!isExpectedDeviceRemovalMessage(message)) {
             QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
@@ -1861,6 +1941,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
 
     auto *video = new VideoSurface(root);
     video->setPresentCadenceMs(presentIntervalMsFromFps(selectedFormat_.framesPerSecond));
+    video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
@@ -1966,6 +2047,9 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
 
 void MainWindow::updateVideoFrame(capture::FrameHandle frame)
 {
+    if (playbackStopping_) {
+        return;
+    }
     if (!videoSurface_ || !frame || frame->isNull()) {
         return;
     }
@@ -1975,6 +2059,9 @@ void MainWindow::updateVideoFrame(capture::FrameHandle frame)
 
 void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
 {
+    if (playbackStopping_) {
+        return;
+    }
     if (!videoSurface_ || !frame) {
         return;
     }
@@ -2210,6 +2297,12 @@ void MainWindow::stopPlaybackAsync()
     }
     playbackStopping_ = true;
     uninhibitScreenSaver();
+    if (playbackControls_) {
+        playbackControls_->setEnabled(false);
+    }
+    if (videoSurface_) {
+        videoSurface_->setStartupOverlayVisible(false);
+    }
     if (audioSession_) {
         audioSession_->stop();
         audioSession_.reset();
@@ -2218,6 +2311,7 @@ void MainWindow::stopPlaybackAsync()
     if (videoSurface_) {
         videoSurface_->releasePlaybackFrames();
     }
+    showStoppingState();
     if (captureSession_ && captureThread_ && captureThread_->isRunning()) {
         QMetaObject::invokeMethod(captureSession_.get(), []() {}, Qt::BlockingQueuedConnection);
     }
@@ -2225,12 +2319,6 @@ void MainWindow::stopPlaybackAsync()
     auto *session = captureSession_.release();
     auto *thread = captureThread_;
     captureThread_ = nullptr;
-
-    if (statsOverlayTimer_ != nullptr) {
-        statsOverlayTimer_->stop();
-    }
-    statsOverlay_.clear();
-    playbackControls_.clear();
 
     if (session != nullptr) {
         QObject::disconnect(session, nullptr, this, nullptr);
