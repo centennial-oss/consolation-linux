@@ -45,6 +45,7 @@ private:
     void stopPlaybackAsync();
     void finishPlaybackStopped();
     void preconfigureSelectedFormat(bool force = false);
+    void refreshStartupDevices();
     void showPlaybackControls();
     void hidePlaybackControls();
     void resetPlaybackControlsTimer();
@@ -64,6 +65,7 @@ private:
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
     QTimer *statsOverlayTimer_ = nullptr;
+    QTimer *startupRefreshTimer_ = nullptr;
     capture::VideoTelemetrySnapshot latestTelemetry_;
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;

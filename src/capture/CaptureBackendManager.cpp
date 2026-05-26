@@ -5,31 +5,36 @@
 
 namespace consolation::capture {
 
+namespace {
+
+bool isLikelyWebcamOrCamera(const CaptureDevice &device)
+{
+    const auto haystack = QStringList {
+        device.displayName,
+        device.devicePath,
+        device.stableId,
+        device.nodeName,
+        device.v4l2DevicePath,
+    }.join(QStringLiteral(" "));
+
+    return haystack.contains(QStringLiteral("webcam"), Qt::CaseInsensitive) ||
+        haystack.contains(QStringLiteral("camera"), Qt::CaseInsensitive);
+}
+
+} // namespace
+
 std::vector<CaptureDevice> CaptureBackendManager::enumerateDevices() const
 {
     std::vector<CaptureDevice> devices;
 
     for (auto device : platform::linux::V4L2DeviceDiscovery().enumerateDevices()) {
+        if (isLikelyWebcamOrCamera(device)) {
+            continue;
+        }
         devices.push_back(std::move(device));
     }
 
-    if (!devices.empty()) {
-        return devices;
-    }
-
-    CaptureDevice mockDevice;
-    mockDevice.backend = CaptureBackend::Mock;
-    mockDevice.devicePath = QStringLiteral("mock://capture-card");
-    mockDevice.displayName = QStringLiteral("Mock Capture Device");
-    mockDevice.stableId = QStringLiteral("mock-capture-card");
-    mockDevice.formats.push_back(CaptureFormat{
-        .width = 1920,
-        .height = 1080,
-        .framesPerSecond = 60.0,
-        .pixelFormat = QStringLiteral("NV12"),
-        .label = QStringLiteral("1920x1080 @ 60p · NV12"),
-    });
-    return {mockDevice};
+    return devices;
 }
 
 std::unique_ptr<CaptureSession> CaptureBackendManager::createSession(const CaptureBackend backend) const

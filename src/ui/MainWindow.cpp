@@ -475,6 +475,30 @@ quint32 stringToFourCc(const QString &value)
     return v4l2_fourcc(latin[0], latin[1], latin[2], latin[3]);
 }
 
+QString deviceListSignature(const std::vector<capture::CaptureDevice> &devices)
+{
+    QStringList entries;
+    for (const auto &device : devices) {
+        QStringList formats;
+        for (const auto &format : device.formats) {
+            formats << QStringLiteral("%1x%2/%3/%4")
+                           .arg(format.width)
+                           .arg(format.height)
+                           .arg(format.framesPerSecond, 0, 'f', 2)
+                           .arg(format.pixelFormat);
+        }
+        entries << QStringLiteral("%1|%2|%3")
+                       .arg(device.stableId, device.devicePath, formats.join(QLatin1Char(',')));
+    }
+    return entries.join(QLatin1Char(';'));
+}
+
+bool isExpectedDeviceRemovalMessage(const QString &message)
+{
+    return message.contains(QStringLiteral("No such device"), Qt::CaseInsensitive) ||
+        message.contains(QStringLiteral("No such file or directory"), Qt::CaseInsensitive);
+}
+
 constexpr auto accentColor = "#CC11BB";
 constexpr auto panelStyle = R"(
     QFrame#startupPanel {
@@ -777,8 +801,6 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1200, 760);
     setMinimumSize(820, 520);
 
-    buildStoppedState();
-
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     controlsHideTimer_->setInterval(3000);
@@ -787,6 +809,12 @@ MainWindow::MainWindow(QWidget *parent)
     statsOverlayTimer_ = new QTimer(this);
     statsOverlayTimer_->setInterval(500);
     connect(statsOverlayTimer_, &QTimer::timeout, this, [this]() { updateStatsOverlay(); });
+
+    startupRefreshTimer_ = new QTimer(this);
+    startupRefreshTimer_->setInterval(3000);
+    connect(startupRefreshTimer_, &QTimer::timeout, this, [this]() { refreshStartupDevices(); });
+
+    buildStoppedState();
 
     qApp->installEventFilter(this);
 }
@@ -835,6 +863,7 @@ void MainWindow::buildStoppedState()
         controlsHideTimer_->stop();
     }
     devices_ = capture::CaptureBackendManager().enumerateDevices();
+    const auto hasDevices = !devices_.empty();
 
     auto *root = new GradientBackground(this);
     auto *rootLayout = new QVBoxLayout(root);
@@ -878,15 +907,28 @@ void MainWindow::buildStoppedState()
     auto *deviceCombo = makeStartupCombo(panel);
     auto *formatCombo = makeStartupCombo(panel);
 
-    for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
-        const auto &device = devices_[index];
-        deviceCombo->addItem(
-            QStringLiteral("%1 (%2)").arg(device.displayName, device.devicePath),
-            index);
+    if (hasDevices) {
+        for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
+            const auto &device = devices_[index];
+            deviceCombo->addItem(
+                QStringLiteral("%1 (%2)").arg(device.displayName, device.devicePath),
+                index);
+        }
+    } else {
+        deviceCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
+        formatCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
+        deviceCombo->setEnabled(false);
+        formatCombo->setEnabled(false);
+        selectedDevice_ = {};
+        selectedFormat_ = {};
     }
 
     const auto refreshFormats = [this, deviceCombo, formatCombo]() {
         formatCombo->clear();
+        if (devices_.empty()) {
+            formatCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
+            return;
+        }
         const auto deviceIndex = deviceCombo->currentData().toInt();
         if (deviceIndex < 0 || deviceIndex >= static_cast<int>(devices_.size())) {
             return;
@@ -913,7 +955,7 @@ void MainWindow::buildStoppedState()
     form->addWidget(makeFieldLabel(QStringLiteral("Device"), panel), 0, 0);
     form->addWidget(deviceCombo, 0, 1);
 
-    form->addWidget(makeFieldLabel(QStringLiteral("Resolution & Frame Rate"), panel), 1, 0);
+    form->addWidget(makeFieldLabel(QStringLiteral("Frame Rate & Resolution"), panel), 1, 0);
     form->addWidget(formatCombo, 1, 1);
 
     panelLayout->addLayout(form);
@@ -922,7 +964,7 @@ void MainWindow::buildStoppedState()
     playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
     playButton->setIconSize(QSize(42, 42));
     playButton->setFixedSize(72, 72);
-    playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
+    playButton->setEnabled(hasDevices && deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
     playButton->setToolTip(QStringLiteral("Start playback."));
     playButton->setStyleSheet(QStringLiteral(
         "QPushButton { color: white; border-radius: 36px; border: none; "
@@ -968,7 +1010,9 @@ void MainWindow::buildStoppedState()
     connect(deviceCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
     connect(formatCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
     updateSelection();
-    QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(true); });
+    if (hasDevices) {
+        QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(true); });
+    }
     panelLayout->addWidget(playButton, 0, Qt::AlignCenter);
 
     rootLayout->addWidget(panel, 0, Qt::AlignHCenter);
@@ -1002,11 +1046,17 @@ void MainWindow::buildStoppedState()
     rootLayout->addLayout(buttonRow);
 
     setCentralWidget(root);
+    if (startupRefreshTimer_ != nullptr) {
+        startupRefreshTimer_->start();
+    }
 }
 
 void MainWindow::startPlayback()
 {
     if (playbackStopping_) {
+        return;
+    }
+    if (selectedDevice_.devicePath.isEmpty()) {
         return;
     }
 
@@ -1017,11 +1067,6 @@ void MainWindow::startPlayback()
         if (!audioSession_->start(selectedDevice_, settings_.volumePercent())) {
             audioSession_.reset();
         }
-    }
-
-    if (selectedDevice_.devicePath.startsWith(QStringLiteral("mock://"))) {
-        QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
-        return;
     }
 
     // OBS tears down the active V4L2 source before opening/configuring it again.
@@ -1080,7 +1125,9 @@ void MainWindow::startPlayback()
     });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
         logCaptureStartup("failed", message);
-        QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
+        if (!isExpectedDeviceRemovalMessage(message)) {
+            QMessageBox::warning(this, QStringLiteral("Capture Failed"), message);
+        }
         stopPlayback();
     });
     connect(captureSession_.get(), &capture::CaptureSession::logMessage, this, [](const QString &message) {
@@ -1126,6 +1173,9 @@ void MainWindow::startPlayback()
 
 void MainWindow::showConnectingState()
 {
+    if (startupRefreshTimer_ != nullptr) {
+        startupRefreshTimer_->stop();
+    }
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
@@ -1154,6 +1204,9 @@ void MainWindow::showConnectingState()
 
 void MainWindow::showStoppingState()
 {
+    if (startupRefreshTimer_ != nullptr) {
+        startupRefreshTimer_->stop();
+    }
     playbackControls_.clear();
     statsOverlay_.clear();
     videoSurface_.clear();
@@ -1183,6 +1236,9 @@ void MainWindow::showStoppingState()
 
 void MainWindow::showPlaybackState(QImage firstFrame)
 {
+    if (startupRefreshTimer_ != nullptr) {
+        startupRefreshTimer_->stop();
+    }
     auto *root = new QWidget(this);
     root->setStyleSheet(QStringLiteral("background-color: black;"));
 
@@ -1399,6 +1455,21 @@ void MainWindow::preconfigureSelectedFormat(const bool force)
     }
 
     ::close(fd);
+}
+
+void MainWindow::refreshStartupDevices()
+{
+    if (captureSession_ || playbackControls_ || videoSurface_ || playbackStopping_) {
+        return;
+    }
+
+    auto refreshedDevices = capture::CaptureBackendManager().enumerateDevices();
+    if (deviceListSignature(refreshedDevices) == deviceListSignature(devices_)) {
+        return;
+    }
+
+    devices_ = std::move(refreshedDevices);
+    buildStoppedState();
 }
 
 void MainWindow::stopPlayback()
