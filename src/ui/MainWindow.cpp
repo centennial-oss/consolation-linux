@@ -32,11 +32,7 @@
 #include <QMessageBox>
 #include <QMetaType>
 #include <QOffscreenSurface>
-#include <QOpenGLBuffer>
 #include <QOpenGLContext>
-#include <QOpenGLFunctions>
-#include <QOpenGLShaderProgram>
-#include <QOpenGLTexture>
 #include <QOpenGLWidget>
 #include <QPainter>
 #include <QPaintEvent>
@@ -177,7 +173,6 @@ public:
     void setFrame(capture::FrameHandle frame) override
     {
         frame_ = std::move(frame);
-        scaledFrameDirty_ = true;
         updateTargetRect();
         update();
     }
@@ -207,12 +202,8 @@ protected:
 private:
     void updateTargetRect()
     {
-        const auto previousTargetSize = targetRect_.size();
         if (!frame_ || frame_->isNull()) {
             targetRect_ = {};
-            if (!previousTargetSize.isEmpty()) {
-                scaledFrameDirty_ = true;
-            }
             return;
         }
 
@@ -221,37 +212,6 @@ private:
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
             targetSize);
-        if (targetRect_.size() != previousTargetSize) {
-            scaledFrameDirty_ = true;
-        }
-    }
-
-    void ensureScaledFrame()
-    {
-        if (!frame_ || frame_->isNull() || targetRect_.isEmpty()) {
-            scaledFrame_ = {};
-            return;
-        }
-
-        const auto targetSize = targetRect_.size();
-        if (targetSize == frame_->size()) {
-            scaledFrame_ = {};
-            scaledFrameDirty_ = false;
-            return;
-        }
-
-        if (!scaledFrameDirty_ && scaledFrame_.size() == targetSize) {
-            return;
-        }
-
-        if (scaledFrame_.size() != targetSize) {
-            scaledFrame_ = QImage(targetSize, QImage::Format_RGB32);
-        }
-
-        QPainter scaler(&scaledFrame_);
-        scaler.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        scaler.drawImage(QRect(QPoint(0, 0), targetSize), *frame_);
-        scaledFrameDirty_ = false;
     }
 
     void paintFrame(QPainter &painter)
@@ -262,38 +222,25 @@ private:
             return;
         }
 
-        ensureScaledFrame();
         painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (!scaledFrame_.isNull()) {
-            painter.drawImage(targetRect_.topLeft(), scaledFrame_);
-            return;
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
+        } else {
+            painter.drawImage(targetRect_, *frame_);
         }
-
-        painter.drawImage(targetRect_.topLeft(), *frame_);
     }
 
     capture::FrameHandle frame_;
-    QImage scaledFrame_;
     QRect targetRect_;
     int paintCount_ = 0;
-    bool scaledFrameDirty_ = true;
 };
 
-class GpuFrameRenderer final : public QOpenGLWidget, protected QOpenGLFunctions, public FrameRenderer {
+class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
 public:
     explicit GpuFrameRenderer(QWidget *parent = nullptr)
         : QOpenGLWidget(parent)
     {
         setAutoFillBackground(false);
-    }
-
-    ~GpuFrameRenderer() override
-    {
-        makeCurrent();
-        texture_.reset();
-        vbo_.destroy();
-        program_.removeAllShaders();
-        doneCurrent();
     }
 
     QWidget *widget() override
@@ -304,7 +251,6 @@ public:
     void setFrame(capture::FrameHandle frame) override
     {
         frame_ = std::move(frame);
-        textureDirty_ = true;
         updateTargetRect();
         update();
     }
@@ -317,88 +263,10 @@ public:
     }
 
 protected:
-    void initializeGL() override
-    {
-        initializeOpenGLFunctions();
-
-        static constexpr char vertexShader[] = R"(
-            attribute vec2 aPos;
-            attribute vec2 aTexCoord;
-            varying vec2 vTexCoord;
-            void main() {
-                gl_Position = vec4(aPos, 0.0, 1.0);
-                vTexCoord = aTexCoord;
-            }
-        )";
-
-        static constexpr char fragmentShader[] = R"(
-            varying vec2 vTexCoord;
-            uniform sampler2D uFrame;
-            void main() {
-                gl_FragColor = texture2D(uFrame, vTexCoord);
-            }
-        )";
-
-        program_.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader);
-        program_.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader);
-        program_.bindAttributeLocation("aPos", 0);
-        program_.bindAttributeLocation("aTexCoord", 1);
-        program_.link();
-
-        static constexpr float quadVertices[] = {
-            // x, y, s, t
-            -1.0F, -1.0F, 0.0F, 1.0F,
-            1.0F, -1.0F, 1.0F, 1.0F,
-            -1.0F, 1.0F, 0.0F, 0.0F,
-            1.0F, 1.0F, 1.0F, 0.0F,
-        };
-
-        vbo_.create();
-        vbo_.bind();
-        vbo_.allocate(quadVertices, static_cast<int>(sizeof(quadVertices)));
-    }
-
     void paintGL() override
     {
-        ++paintCount_;
-
-        const auto dpr = devicePixelRatioF();
-        const auto deviceWidth = std::max(1, static_cast<int>(std::lround(width() * dpr)));
-        const auto deviceHeight = std::max(1, static_cast<int>(std::lround(height() * dpr)));
-
-        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-        glViewport(0, 0, deviceWidth, deviceHeight);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        if (!frame_ || frame_->isNull()) {
-            return;
-        }
-
-        uploadTextureIfNeeded();
-        if (!texture_ || !texture_->isCreated()) {
-            return;
-        }
-
-        auto viewport = widgetRectToGlViewport(targetRect_, height(), dpr);
-        if (viewport.isEmpty()) {
-            viewport = QRect(0, 0, deviceWidth, deviceHeight);
-        }
-        glViewport(viewport.x(), viewport.y(), viewport.width(), viewport.height());
-
-        program_.bind();
-        vbo_.bind();
-        program_.enableAttributeArray(0);
-        program_.setAttributeBuffer(0, GL_FLOAT, 0, 2, static_cast<int>(4 * sizeof(float)));
-        program_.enableAttributeArray(1);
-        program_.setAttributeBuffer(1, GL_FLOAT, static_cast<int>(2 * sizeof(float)), 2, static_cast<int>(4 * sizeof(float)));
-
-        texture_->bind(0);
-        program_.setUniformValue("uFrame", 0);
-
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        texture_->release();
-        program_.release();
+        QPainter painter(this);
+        paintFrame(painter);
     }
 
     void resizeEvent(QResizeEvent *event) override
@@ -408,18 +276,6 @@ protected:
     }
 
 private:
-    static QRect widgetRectToGlViewport(const QRect &widgetRect, const int widgetHeight, const qreal devicePixelRatio)
-    {
-        if (widgetRect.isEmpty() || devicePixelRatio <= 0.0) {
-            return {};
-        }
-        return QRect(
-            static_cast<int>(std::lround(widgetRect.x() * devicePixelRatio)),
-            static_cast<int>(std::lround((widgetHeight - widgetRect.y() - widgetRect.height()) * devicePixelRatio)),
-            std::max(1, static_cast<int>(std::lround(widgetRect.width() * devicePixelRatio))),
-            std::max(1, static_cast<int>(std::lround(widgetRect.height() * devicePixelRatio))));
-    }
-
     void updateTargetRect()
     {
         if (!frame_ || frame_->isNull()) {
@@ -434,36 +290,25 @@ private:
             targetSize);
     }
 
-    void uploadTextureIfNeeded()
+    void paintFrame(QPainter &painter)
     {
-        if (!textureDirty_ || !frame_ || frame_->isNull()) {
+        ++paintCount_;
+        painter.fillRect(rect(), Qt::black);
+        if (!frame_ || frame_->isNull()) {
             return;
         }
 
-        if (!texture_) {
-            texture_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
-            texture_->setMinificationFilter(QOpenGLTexture::Linear);
-            texture_->setMagnificationFilter(QOpenGLTexture::Linear);
-            texture_->setWrapMode(QOpenGLTexture::ClampToEdge);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
+        } else {
+            painter.drawImage(targetRect_, *frame_);
         }
-
-        if (texture_->width() != frame_->width() || texture_->height() != frame_->height()) {
-            texture_->setSize(frame_->width(), frame_->height());
-            texture_->setFormat(QOpenGLTexture::RGBA8_UNorm);
-            texture_->allocateStorage();
-        }
-
-        texture_->setData(*frame_);
-        textureDirty_ = false;
     }
 
-    QOpenGLShaderProgram program_;
-    QOpenGLBuffer vbo_ { QOpenGLBuffer::VertexBuffer };
-    std::unique_ptr<QOpenGLTexture> texture_;
     capture::FrameHandle frame_;
     QRect targetRect_;
     int paintCount_ = 0;
-    bool textureDirty_ = false;
 };
 
 bool canCreateOpenGLContext()
