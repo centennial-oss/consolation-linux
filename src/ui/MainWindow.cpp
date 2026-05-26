@@ -8,6 +8,7 @@
 #include "ui/AppIcon.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
@@ -26,6 +27,7 @@
 #include <QIODevice>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaType>
 #include <QOffscreenSurface>
@@ -39,6 +41,7 @@
 #include <QSizePolicy>
 #include <QSlider>
 #include <QStyle>
+#include <QSet>
 #include <QStringList>
 #include <QTextEdit>
 #include <QThread>
@@ -53,11 +56,14 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <iostream>
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
 #include <utility>
 #include <unistd.h>
+#include <array>
+#include <set>
 #include <vector>
 
 namespace consolation::ui {
@@ -526,6 +532,42 @@ constexpr auto comboStyle = R"(
         selection-background-color: #CC11BB;
     }
 )";
+constexpr auto startupMenuButtonStyle = R"(
+    QPushButton {
+        color: white;
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid rgba(255, 255, 255, 190);
+        padding: 6px 28px 7px 0;
+        font-size: 18px;
+        text-align: left;
+    }
+    QPushButton:disabled {
+        color: rgba(255, 255, 255, 120);
+        border-bottom-color: rgba(255, 255, 255, 90);
+    }
+    QPushButton::menu-indicator {
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+    }
+    QMenu {
+        color: white;
+        background-color: #250019;
+        border: 1px solid rgba(255, 255, 255, 80);
+    }
+    QMenu::item {
+        font-size: 18px;
+        padding: 5px 42px 5px 16px;
+    }
+    QMenu::item:selected {
+        background-color: #CC11BB;
+    }
+    QMenu::separator {
+        height: 1px;
+        background: rgba(255, 255, 255, 90);
+        margin: 8px 12px;
+    }
+)";
 constexpr auto pillButtonStyle = R"(
     QPushButton {
         color: white;
@@ -677,6 +719,87 @@ QComboBox *makeStartupCombo(QWidget *parent)
     combo->setMinimumWidth(320);
     combo->setMaximumWidth(340);
     return combo;
+}
+
+QPushButton *makeStartupMenuButton(QWidget *parent)
+{
+    auto *button = new QPushButton(parent);
+    button->setStyleSheet(QString::fromUtf8(startupMenuButtonStyle));
+    button->setMinimumWidth(320);
+    button->setMaximumWidth(340);
+    return button;
+}
+
+QString frameRateLabel(const double fps)
+{
+    const auto rounded = std::round(fps);
+    if (std::abs(fps - rounded) <= 0.01) {
+        return QStringLiteral("%1 fps").arg(static_cast<int>(rounded));
+    }
+    return QStringLiteral("%1 fps").arg(QString::number(fps, 'f', 2));
+}
+
+int resolutionPreferenceIndex(const int width, const int height)
+{
+    static constexpr std::array<std::pair<int, int>, 4> preferred {{
+        {3840, 2160},
+        {2560, 1440},
+        {1920, 1080},
+        {1280, 720},
+    }};
+
+    for (auto index = 0U; index < preferred.size(); ++index) {
+        if (preferred[index].first == width && preferred[index].second == height) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+int pixelFormatPreference(const QString &pixelFormat)
+{
+    const auto upper = pixelFormat.toUpper();
+    if (upper == QStringLiteral("NV12")) {
+        return 0;
+    }
+    if (upper == QStringLiteral("YUYV")) {
+        return 1;
+    }
+    if (upper == QStringLiteral("YUY2")) {
+        return 2;
+    }
+    if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
+        return 4;
+    }
+    static const QSet<QString> uncompressed {
+        QStringLiteral("I420"),
+        QStringLiteral("YV12"),
+        QStringLiteral("YU12"),
+        QStringLiteral("YVU420"),
+        QStringLiteral("RGB3"),
+        QStringLiteral("BGR3"),
+        QStringLiteral("RGB24"),
+        QStringLiteral("BGR24"),
+    };
+    if (uncompressed.contains(upper)) {
+        return 3;
+    }
+    return 5;
+}
+
+bool formatIsPreferredDefault(const capture::CaptureFormat &format)
+{
+    return format.width == 1920 &&
+        format.height == 1080 &&
+        std::abs(format.framesPerSecond - 60.0) <= 0.5 &&
+        (format.pixelFormat == QStringLiteral("NV12") ||
+         format.pixelFormat == QStringLiteral("YUYV") ||
+         format.pixelFormat == QStringLiteral("YUY2"));
+}
+
+QString formatLeafLabel(const capture::CaptureFormat &format)
+{
+    return format.pixelFormat.isEmpty() ? format.label : format.pixelFormat;
 }
 
 QPushButton *makePillButton(const QIcon &icon, const QString &text, QWidget *parent)
@@ -905,7 +1028,7 @@ void MainWindow::buildStoppedState()
     form->setColumnMinimumWidth(0, 250);
 
     auto *deviceCombo = makeStartupCombo(panel);
-    auto *formatCombo = makeStartupCombo(panel);
+    auto *formatButton = makeStartupMenuButton(panel);
 
     if (hasDevices) {
         for (auto index = 0; index < static_cast<int>(devices_.size()); ++index) {
@@ -916,47 +1039,18 @@ void MainWindow::buildStoppedState()
         }
     } else {
         deviceCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
-        formatCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
+        formatButton->setText(QStringLiteral("No Capture Cards Detected"));
         deviceCombo->setEnabled(false);
-        formatCombo->setEnabled(false);
+        formatButton->setEnabled(false);
         selectedDevice_ = {};
         selectedFormat_ = {};
     }
-
-    const auto refreshFormats = [this, deviceCombo, formatCombo]() {
-        formatCombo->clear();
-        if (devices_.empty()) {
-            formatCombo->addItem(QStringLiteral("No Capture Cards Detected"), -1);
-            return;
-        }
-        const auto deviceIndex = deviceCombo->currentData().toInt();
-        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(devices_.size())) {
-            return;
-        }
-        const auto &device = devices_[deviceIndex];
-        auto preferredFormatComboIndex = -1;
-        for (auto formatIndex = 0; formatIndex < static_cast<int>(device.formats.size()); ++formatIndex) {
-            const auto &format = device.formats[formatIndex];
-            formatCombo->addItem(format.label, formatIndex);
-            if (preferredFormatComboIndex < 0 &&
-                format.width == 1920 &&
-                format.height == 1080 &&
-                std::abs(format.framesPerSecond - 60.0) <= 0.5 &&
-                (format.pixelFormat == QStringLiteral("YUYV") || format.pixelFormat == QStringLiteral("YUY2"))) {
-                preferredFormatComboIndex = formatCombo->count() - 1;
-            }
-        }
-        if (preferredFormatComboIndex >= 0) {
-            formatCombo->setCurrentIndex(preferredFormatComboIndex);
-        }
-    };
-    refreshFormats();
 
     form->addWidget(makeFieldLabel(QStringLiteral("Device"), panel), 0, 0);
     form->addWidget(deviceCombo, 0, 1);
 
     form->addWidget(makeFieldLabel(QStringLiteral("Frame Rate & Resolution"), panel), 1, 0);
-    form->addWidget(formatCombo, 1, 1);
+    form->addWidget(formatButton, 1, 1);
 
     panelLayout->addLayout(form);
 
@@ -964,7 +1058,7 @@ void MainWindow::buildStoppedState()
     playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
     playButton->setIconSize(QSize(42, 42));
     playButton->setFixedSize(72, 72);
-    playButton->setEnabled(hasDevices && deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
+    playButton->setEnabled(false);
     playButton->setToolTip(QStringLiteral("Start playback."));
     playButton->setStyleSheet(QStringLiteral(
         "QPushButton { color: white; border-radius: 36px; border: none; "
@@ -976,40 +1070,154 @@ void MainWindow::buildStoppedState()
         playButton->setEnabled(false);
         startPlayback();
     });
-    connect(
-        deviceCombo,
-        &QComboBox::currentIndexChanged,
-        this,
-        [refreshFormats, playButton, deviceCombo, formatCombo](int) {
-            refreshFormats();
-            playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
-        });
-    connect(
-        formatCombo,
-        &QComboBox::currentIndexChanged,
-        this,
-        [playButton, deviceCombo, formatCombo](int) {
-            playButton->setEnabled(deviceCombo->currentIndex() >= 0 && formatCombo->currentIndex() >= 0);
-        });
-    const auto updateSelection = [this, deviceCombo, formatCombo]() {
+    const auto selectFormat = [this, formatButton, playButton](const int formatIndex) {
+        if (selectedDevice_.devicePath.isEmpty() ||
+            formatIndex < 0 ||
+            formatIndex >= static_cast<int>(selectedDevice_.formats.size())) {
+            selectedFormat_ = {};
+            formatButton->setText(QStringLiteral("Select Format"));
+            playButton->setEnabled(false);
+            return;
+        }
+
+        selectedFormat_ = selectedDevice_.formats[formatIndex];
+        formatButton->setText(selectedFormat_.label);
+        playButton->setEnabled(true);
+        QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(); });
+    };
+    const auto rebuildFormatMenu = [this, deviceCombo, formatButton, playButton, selectFormat]() {
         const auto deviceIndex = deviceCombo->currentData().toInt();
         if (deviceIndex < 0 || deviceIndex >= static_cast<int>(devices_.size())) {
             selectedDevice_ = {};
             selectedFormat_ = {};
+            if (auto *oldMenu = formatButton->menu(); oldMenu != nullptr) {
+                formatButton->setMenu(nullptr);
+                oldMenu->deleteLater();
+            }
+            formatButton->setText(QStringLiteral("No Capture Cards Detected"));
+            formatButton->setEnabled(false);
+            playButton->setEnabled(false);
             return;
         }
+
         selectedDevice_ = devices_[deviceIndex];
-        const auto formatIndex = formatCombo->currentData().toInt();
-        if (formatIndex < 0 || formatIndex >= static_cast<int>(selectedDevice_.formats.size())) {
-            selectedFormat_ = {};
-            return;
+        formatButton->setEnabled(!selectedDevice_.formats.empty());
+        playButton->setEnabled(false);
+
+        auto *menu = new QMenu(formatButton);
+
+        std::vector<std::pair<int, int>> resolutions;
+        std::set<std::pair<int, int>> seenResolutions;
+        for (const auto &format : selectedDevice_.formats) {
+            const auto key = std::make_pair(format.width, format.height);
+            if (seenResolutions.insert(key).second) {
+                resolutions.push_back(key);
+            }
         }
-        selectedFormat_ = selectedDevice_.formats[formatIndex];
-        QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(); });
+        std::sort(resolutions.begin(), resolutions.end(), [](const auto &lhs, const auto &rhs) {
+            const auto lhsPreferred = resolutionPreferenceIndex(lhs.first, lhs.second);
+            const auto rhsPreferred = resolutionPreferenceIndex(rhs.first, rhs.second);
+            if (lhsPreferred >= 0 || rhsPreferred >= 0) {
+                if (lhsPreferred < 0) {
+                    return false;
+                }
+                if (rhsPreferred < 0) {
+                    return true;
+                }
+                return lhsPreferred < rhsPreferred;
+            }
+            if (lhs.first != rhs.first) {
+                return lhs.first > rhs.first;
+            }
+            return lhs.second > rhs.second;
+        });
+
+        auto addedDivider = false;
+        auto defaultFormatIndex = -1;
+        for (const auto &[width, height] : resolutions) {
+            if (!addedDivider && resolutionPreferenceIndex(width, height) < 0 && !menu->isEmpty()) {
+                menu->addSeparator();
+                addedDivider = true;
+            }
+
+            auto *resolutionMenu = menu->addMenu(QStringLiteral("%1x%2").arg(width).arg(height));
+
+            std::vector<int> frameRateKeys;
+            std::set<int> seenFrameRates;
+            for (auto formatIndex = 0; formatIndex < static_cast<int>(selectedDevice_.formats.size()); ++formatIndex) {
+                const auto &format = selectedDevice_.formats[formatIndex];
+                if (format.width != width || format.height != height) {
+                    continue;
+                }
+                const auto fpsKey = static_cast<int>(std::round(format.framesPerSecond * 1000.0));
+                if (seenFrameRates.insert(fpsKey).second) {
+                    frameRateKeys.push_back(fpsKey);
+                }
+                if ((defaultFormatIndex < 0 && formatIsPreferredDefault(format)) ||
+                    (defaultFormatIndex >= 0 &&
+                     formatIsPreferredDefault(format) &&
+                     pixelFormatPreference(format.pixelFormat) < pixelFormatPreference(selectedDevice_.formats[defaultFormatIndex].pixelFormat))) {
+                    defaultFormatIndex = formatIndex;
+                }
+            }
+            std::sort(frameRateKeys.begin(), frameRateKeys.end(), std::greater<>());
+
+            for (const auto fpsKey : frameRateKeys) {
+                const auto fps = static_cast<double>(fpsKey) / 1000.0;
+                auto *frameRateMenu = resolutionMenu->addMenu(frameRateLabel(fps));
+
+                std::vector<int> formatIndices;
+                for (auto formatIndex = 0; formatIndex < static_cast<int>(selectedDevice_.formats.size()); ++formatIndex) {
+                    const auto &format = selectedDevice_.formats[formatIndex];
+                    if (format.width == width &&
+                        format.height == height &&
+                        static_cast<int>(std::round(format.framesPerSecond * 1000.0)) == fpsKey) {
+                        formatIndices.push_back(formatIndex);
+                    }
+                }
+                std::sort(formatIndices.begin(), formatIndices.end(), [this](const auto lhs, const auto rhs) {
+                    const auto &lhsFormat = selectedDevice_.formats[lhs];
+                    const auto &rhsFormat = selectedDevice_.formats[rhs];
+                    const auto lhsPreference = pixelFormatPreference(lhsFormat.pixelFormat);
+                    const auto rhsPreference = pixelFormatPreference(rhsFormat.pixelFormat);
+                    if (lhsPreference != rhsPreference) {
+                        return lhsPreference < rhsPreference;
+                    }
+                    return lhsFormat.pixelFormat < rhsFormat.pixelFormat;
+                });
+
+                for (const auto formatIndex : formatIndices) {
+                    auto *action = frameRateMenu->addAction(formatLeafLabel(selectedDevice_.formats[formatIndex]));
+                    connect(action, &QAction::triggered, this, [selectFormat, formatIndex]() { selectFormat(formatIndex); });
+                }
+            }
+        }
+
+        if (defaultFormatIndex < 0 && !selectedDevice_.formats.empty()) {
+            defaultFormatIndex = 0;
+        }
+
+        if (auto *oldMenu = formatButton->menu(); oldMenu != nullptr) {
+            formatButton->setMenu(nullptr);
+            oldMenu->deleteLater();
+        }
+        formatButton->setMenu(menu);
+        if (defaultFormatIndex >= 0) {
+            selectFormat(defaultFormatIndex);
+        } else {
+            formatButton->setText(QStringLiteral("No Formats Advertised"));
+            formatButton->setEnabled(false);
+            playButton->setEnabled(false);
+        }
     };
-    connect(deviceCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
-    connect(formatCombo, &QComboBox::currentIndexChanged, this, [updateSelection](int) { updateSelection(); });
-    updateSelection();
+    connect(
+        deviceCombo,
+        &QComboBox::currentIndexChanged,
+        this,
+        [rebuildFormatMenu](int) {
+            rebuildFormatMenu();
+        });
+    rebuildFormatMenu();
     if (hasDevices) {
         QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(true); });
     }
