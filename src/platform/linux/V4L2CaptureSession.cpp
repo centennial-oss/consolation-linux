@@ -739,7 +739,8 @@ bool V4L2CaptureSession::pixelFormatSupportsDmaBufDisplay(const quint32 pixelFor
 {
     return pixelFormat == V4L2_PIX_FMT_NV12 || pixelFormat == V4L2_PIX_FMT_RGB24 ||
         pixelFormat == V4L2_PIX_FMT_BGR24 || pixelFormat == V4L2_PIX_FMT_YUYV ||
-        pixelFormat == v4l2_fourcc('Y', 'U', 'Y', '2');
+        pixelFormat == v4l2_fourcc('Y', 'U', 'Y', '2') || pixelFormat == V4L2_PIX_FMT_YUV420 ||
+        pixelFormat == V4L2_PIX_FMT_YVU420;
 }
 
 bool V4L2CaptureSession::useDmaBufDisplayPath() const
@@ -779,6 +780,12 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     } else if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
         payload->layout = capture::DmaBufLayout::Yuyv422;
         payload->stride = std::max(bytesPerLine_, width_ * 2);
+    } else if (pixelFormat_ == V4L2_PIX_FMT_YUV420) {
+        payload->layout = capture::DmaBufLayout::I420;
+        payload->stride = std::max(bytesPerLine_, width_);
+    } else if (pixelFormat_ == V4L2_PIX_FMT_YVU420) {
+        payload->layout = capture::DmaBufLayout::Yv12;
+        payload->stride = std::max(bytesPerLine_, width_);
     } else {
         delete payload;
         return {};

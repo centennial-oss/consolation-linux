@@ -50,6 +50,8 @@ add_library(consolation_core STATIC
     src/platform/linux/RgbDmaBufGl.h
     src/platform/linux/YuyvDmaBufGl.cpp
     src/platform/linux/YuyvDmaBufGl.h
+    src/platform/linux/I420DmaBufGl.cpp
+    src/platform/linux/I420DmaBufGl.h
     src/platform/linux/V4L2CaptureSession.cpp
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp

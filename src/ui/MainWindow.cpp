@@ -8,6 +8,7 @@
 #include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/YuyvDmaBufGl.h"
+#include "platform/linux/I420DmaBufGl.h"
 
 #include "capture/FourCc.h"
 #include "platform/linux/PipeWireAudioSession.h"
@@ -294,7 +295,7 @@ public:
     {
         dmaFrame_.reset();
         boundDmaFrame_.reset();
-        if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value()) {
+        if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
             return;
         }
 
@@ -311,6 +312,10 @@ public:
             if (yuyvGl_.has_value()) {
                 yuyvGl_->releaseAllSlots();
                 yuyvGl_->releaseFrame();
+            }
+            if (i420Gl_.has_value()) {
+                i420Gl_->releaseAllSlots();
+                i420Gl_->releaseFrame();
             }
             doneCurrent();
         }
@@ -331,6 +336,10 @@ public:
             if (yuyvGl_.has_value()) {
                 yuyvGl_->shutdown();
                 yuyvGl_.reset();
+            }
+            if (i420Gl_.has_value()) {
+                i420Gl_->shutdown();
+                i420Gl_.reset();
             }
             doneCurrent();
         }
@@ -358,6 +367,9 @@ public:
         }
         if (yuyvGl_.has_value()) {
             yuyvGl_->releaseFrame();
+        }
+        if (i420Gl_.has_value()) {
+            i420Gl_->releaseFrame();
         }
         frame_ = std::move(frame);
         updateTargetRect();
@@ -416,6 +428,18 @@ protected:
                 std::cout << " (" << reason.toStdString() << ")";
             }
             std::cout << "; YUYV/YUY2 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+
+        i420Gl_.emplace();
+        if (!i420Gl_->initialize()) {
+            const auto reason = i420Gl_->lastInitFailure();
+            i420Gl_.reset();
+            std::cout << "[MainWindow capture] I420/YV12 DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; YU12/I420/YV12 will use libyuv CPU decode" << std::endl;
             std::cout.flush();
         }
     }
@@ -571,6 +595,33 @@ private:
             return true;
         }
 
+        if (dmaFrame_->layout == capture::DmaBufLayout::I420 ||
+            dmaFrame_->layout == capture::DmaBufLayout::Yv12) {
+            if (!i420Gl_ || !i420Gl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!i420Gl_->bindFrame(dmaFrame_)) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        const auto reason = i420Gl_->lastBindFailure().isEmpty()
+                            ? i420Gl_->lastInitFailure()
+                            : i420Gl_->lastBindFailure();
+                        std::cout << "[MainWindow capture] I420/YV12 dma-buf bind failed: "
+                                  << reason.toStdString() << std::endl;
+                        std::cout.flush();
+                    }
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            i420Gl_->draw(size(), targetRect_, dpr);
+            notifyFirstFramePainted();
+            return true;
+        }
+
         return false;
     }
 
@@ -586,6 +637,7 @@ private:
     std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
     std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
     std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
+    std::optional<platform::linux::I420DmaBufGl> i420Gl_;
     capture::FrameHandle frame_;
     capture::DmaBufFrameHandle dmaFrame_;
     capture::DmaBufFrameHandle boundDmaFrame_;
@@ -603,7 +655,9 @@ bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
     return upper == QStringLiteral("NV12") || upper == QStringLiteral("RGB3") ||
         upper == QStringLiteral("RGB24") || upper == QStringLiteral("BGR3") ||
         upper == QStringLiteral("BGR24") || upper == QStringLiteral("YUYV") ||
-        upper == QStringLiteral("YUY2");
+        upper == QStringLiteral("YUY2") || upper == QStringLiteral("YU12") ||
+        upper == QStringLiteral("I420") || upper == QStringLiteral("YV12") ||
+        upper == QStringLiteral("YVU420");
 }
 
 bool canCreateOpenGLContext()
