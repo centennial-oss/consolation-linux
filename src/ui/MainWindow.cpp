@@ -2707,3 +2707,5 @@ void MainWindow::showAboutDialog()
 }
 
 } // namespace consolation::ui
+
+#include "MainWindow.moc"
