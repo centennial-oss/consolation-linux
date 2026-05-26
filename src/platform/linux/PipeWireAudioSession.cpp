@@ -25,7 +25,6 @@ constexpr int audioRate = 48000;
 constexpr int audioChannels = 2;
 constexpr size_t fallbackPlaybackQuantumFrames = 1024;
 constexpr size_t ringCapacityFrames = audioRate / 10; // 100 ms
-constexpr auto audioSourceEnv = "CONSOLATION_PIPEWIRE_AUDIO_SOURCE";
 
 std::once_flag pipeWireInitFlag;
 
@@ -100,11 +99,6 @@ bool PipeWireAudioSession::start(const capture::CaptureDevice &device, const int
         PW_KEY_MEDIA_CATEGORY, "Capture",
         PW_KEY_MEDIA_ROLE, "Camera",
         nullptr);
-    const auto requestedSource = qEnvironmentVariable(audioSourceEnv);
-    if (!requestedSource.isEmpty()) {
-        pw_properties_set(captureProperties, PW_KEY_TARGET_OBJECT, requestedSource.toUtf8().constData());
-        logAudio(QStringLiteral("targeting PipeWire audio source %1 from %2").arg(requestedSource, QString::fromUtf8(audioSourceEnv)));
-    }
     captureStream_ = pw_stream_new_simple(
         pw_thread_loop_get_loop(loop_),
         "Consolation Capture Audio",
