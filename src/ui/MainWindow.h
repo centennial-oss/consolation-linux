@@ -18,6 +18,7 @@ class QTimer;
 
 namespace consolation::ui {
 
+class ScreenInhibitor;
 class VideoSurface;
 
 class MainWindow final : public QMainWindow {
@@ -42,6 +43,8 @@ private:
     void showPlaybackControls();
     void hidePlaybackControls();
     void resetPlaybackControlsTimer();
+    void inhibitScreenSaver();
+    void uninhibitScreenSaver();
     void showSettingsDialog();
     void showHelpDialog();
     void showAboutDialog();
@@ -60,6 +63,7 @@ private:
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
     std::unique_ptr<capture::CaptureSession> captureSession_;
+    std::unique_ptr<ScreenInhibitor> screenInhibitor_;
     QThread *captureThread_ = nullptr;
 };
 

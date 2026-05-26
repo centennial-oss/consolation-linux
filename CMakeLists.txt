@@ -12,7 +12,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui Svg Widgets)
 find_path(LIBV4L2_INCLUDE_DIR NAMES libv4l2.h REQUIRED)
 find_library(LIBV4L2_LIBRARY NAMES v4l2 REQUIRED)
 
@@ -62,6 +62,7 @@ target_link_libraries(consolation_core
 )
 
 add_executable(consolation
+    resources/consolation.qrc
     src/app/main.cpp
     src/ui/AppIcon.cpp
     src/ui/AppIcon.h
@@ -72,7 +73,9 @@ add_executable(consolation
 target_link_libraries(consolation
     PRIVATE
         consolation_core
+        Qt6::DBus
         Qt6::Gui
+        Qt6::Svg
         Qt6::Widgets
 )
 
@@ -97,13 +100,13 @@ set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "libqt6core6t64 | libqt6core6, libqt6gui6t64 | libqt6gui6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
+    "libqt6core6t64 | libqt6core6, libqt6dbus6t64 | libqt6dbus6, libqt6gui6t64 | libqt6gui6, libqt6svg6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
 )
 
 set(CPACK_RPM_PACKAGE_LICENSE "Apache-2.0")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
 set(CPACK_RPM_PACKAGE_REQUIRES
-    "qt6-qtbase, qt6-qtbase-gui, qt6-qtwayland"
+    "qt6-qtbase, qt6-qtbase-gui, qt6-qtsvg, qt6-qtwayland"
 )
 
 include(CPack)

@@ -10,19 +10,26 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusReply>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEvent>
+#include <QFile>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QIcon>
+#include <QIODevice>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QMessageBox>
 #include <QMetaType>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSize>
 #include <QSizePolicy>
@@ -35,6 +42,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QWindow>
+#include <QSvgRenderer>
 
 #include <cerrno>
 #include <cmath>
@@ -48,6 +57,86 @@
 #include <vector>
 
 namespace consolation::ui {
+
+class ScreenInhibitor final {
+public:
+    void inhibit(QWindow *window)
+    {
+        if (active_) {
+            return;
+        }
+
+        const auto appName = QString::fromUtf8(consolation::app::AppMetadata::displayName);
+        const auto reason = QStringLiteral("Video playback is in progress.");
+
+        QDBusInterface freedesktop(
+            QStringLiteral("org.freedesktop.ScreenSaver"),
+            QStringLiteral("/org/freedesktop/ScreenSaver"),
+            QStringLiteral("org.freedesktop.ScreenSaver"),
+            QDBusConnection::sessionBus());
+        const QDBusReply<uint> freedesktopReply = freedesktop.call(QStringLiteral("Inhibit"), appName, reason);
+        if (freedesktopReply.isValid()) {
+            active_ = true;
+            service_ = Service::FreedesktopScreenSaver;
+            cookie_ = freedesktopReply.value();
+            return;
+        }
+
+        QDBusInterface gnome(
+            QStringLiteral("org.gnome.SessionManager"),
+            QStringLiteral("/org/gnome/SessionManager"),
+            QStringLiteral("org.gnome.SessionManager"),
+            QDBusConnection::sessionBus());
+        const auto xid = static_cast<uint>(window != nullptr ? window->winId() : 0);
+        const QDBusReply<uint> gnomeReply = gnome.call(QStringLiteral("Inhibit"), appName, xid, reason, uint { 8 });
+        if (gnomeReply.isValid()) {
+            active_ = true;
+            service_ = Service::GnomeSessionManager;
+            cookie_ = gnomeReply.value();
+        }
+    }
+
+    void uninhibit()
+    {
+        if (!active_) {
+            return;
+        }
+
+        switch (service_) {
+        case Service::FreedesktopScreenSaver: {
+            QDBusInterface freedesktop(
+                QStringLiteral("org.freedesktop.ScreenSaver"),
+                QStringLiteral("/org/freedesktop/ScreenSaver"),
+                QStringLiteral("org.freedesktop.ScreenSaver"),
+                QDBusConnection::sessionBus());
+            freedesktop.call(QStringLiteral("UnInhibit"), cookie_);
+            break;
+        }
+        case Service::GnomeSessionManager: {
+            QDBusInterface gnome(
+                QStringLiteral("org.gnome.SessionManager"),
+                QStringLiteral("/org/gnome/SessionManager"),
+                QStringLiteral("org.gnome.SessionManager"),
+                QDBusConnection::sessionBus());
+            gnome.call(QStringLiteral("Uninhibit"), cookie_);
+            break;
+        }
+        }
+
+        active_ = false;
+        cookie_ = 0;
+    }
+
+private:
+    enum class Service {
+        FreedesktopScreenSaver,
+        GnomeSessionManager,
+    };
+
+    bool active_ = false;
+    Service service_ = Service::FreedesktopScreenSaver;
+    uint cookie_ = 0;
+};
 
 class VideoSurface final : public QWidget {
 public:
@@ -84,7 +173,13 @@ public:
     void setOverlay(QWidget *overlay)
     {
         overlay_ = overlay;
-        positionOverlay();
+        positionOverlays();
+    }
+
+    void setControlsOverlay(QWidget *overlay)
+    {
+        controlsOverlay_ = overlay;
+        positionOverlays();
     }
 
     int takePaintCount()
@@ -118,7 +213,7 @@ protected:
     {
         QWidget::resizeEvent(event);
         updateTargetRect();
-        positionOverlay();
+        positionOverlays();
     }
 
 private:
@@ -148,27 +243,39 @@ private:
         ++uiFrameCount_;
     }
 
-    void positionOverlay()
+    void positionOverlays()
     {
-        if (overlay_ == nullptr) {
-            return;
+        if (overlay_ != nullptr) {
+            overlay_->adjustSize();
+            const int margin = 14;
+            const auto overlaySize = overlay_->sizeHint();
+            overlay_->setGeometry(
+                margin,
+                std::max(margin, height() - overlaySize.height() - margin),
+                std::min(overlaySize.width(), std::max(0, width() - margin * 2)),
+                overlaySize.height());
+            overlay_->raise();
         }
 
-        overlay_->adjustSize();
-        const int margin = 14;
-        const auto overlaySize = overlay_->sizeHint();
-        overlay_->setGeometry(
-            margin,
-            std::max(margin, height() - overlaySize.height() - margin),
-            std::min(overlaySize.width(), std::max(0, width() - margin * 2)),
-            overlaySize.height());
-        overlay_->raise();
+        if (controlsOverlay_ != nullptr) {
+            controlsOverlay_->adjustSize();
+            const int margin = 16;
+            const auto overlaySize = controlsOverlay_->sizeHint();
+            const auto overlayWidth = std::min(overlaySize.width(), std::max(0, width() - margin * 2));
+            controlsOverlay_->setGeometry(
+                std::max(margin, (width() - overlayWidth) / 2),
+                std::max(margin, height() - overlaySize.height() - margin),
+                overlayWidth,
+                overlaySize.height());
+            controlsOverlay_->raise();
+        }
     }
 
     QImage frame_;
     QImage pendingFrame_;
     QRect targetRect_;
     QPointer<QWidget> overlay_;
+    QPointer<QWidget> controlsOverlay_;
     int paintCount_ = 0;
     int uiFrameCount_ = 0;
     bool renderQueued_ = false;
@@ -277,12 +384,9 @@ constexpr auto dialogStyle = R"(
 )";
 constexpr auto playbackButtonStyle = R"(
     QPushButton {
-        color: white;
         background-color: rgba(255, 255, 255, 22);
         border: none;
         border-radius: 32px;
-        font-size: 30px;
-        font-weight: 500;
     }
     QPushButton:hover {
         background-color: rgba(255, 255, 255, 42);
@@ -300,15 +404,35 @@ constexpr auto playbackSliderStyle = R"(
     }
     QSlider::handle:horizontal {
         background: #CC11BB;
-        border: 8px solid #4a4a4f;
-        width: 22px;
-        height: 22px;
-        margin: -15px 0;
-        border-radius: 19px;
+        border: 6px solid #4a4a4f;
+        width: 18px;
+        height: 18px;
+        margin: -11px 0;
+        border-radius: 15px;
     }
 )";
 constexpr bool showVideoStatsOverlay = true;
 constexpr bool showAdvancedVideoStats = true;
+
+QPixmap renderIconPixmap(const QString &resourcePath, const QColor &color, const int size)
+{
+    QFile file(resourcePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+
+    auto svg = QString::fromUtf8(file.readAll());
+    svg.replace(QStringLiteral("currentColor"), color.name(QColor::HexRgb));
+
+    QSvgRenderer renderer(svg.toUtf8());
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    renderer.render(&painter);
+    painter.end();
+    return pixmap;
+}
 
 class GradientBackground final : public QWidget {
 public:
@@ -385,12 +509,64 @@ QFrame *makeBarDivider(QWidget *parent)
     return divider;
 }
 
-QPushButton *makePlaybackCircleButton(const QString &text, const QString &color, QWidget *parent)
+void setPlaybackButtonPixmap(QPushButton *button, const QPixmap &pixmap)
 {
-    auto *button = new QPushButton(text, parent);
+    if (button == nullptr) {
+        return;
+    }
+
+    auto *iconLabel = button->findChild<QLabel *>(QStringLiteral("playbackButtonIcon"));
+    if (iconLabel == nullptr) {
+        return;
+    }
+
+    iconLabel->setPixmap(pixmap);
+}
+
+QPushButton *makePlaybackCircleButton(const QPixmap &pixmap, QWidget *parent)
+{
+    auto *button = new QPushButton(parent);
     button->setFixedSize(36, 36);
-    button->setStyleSheet(QString::fromUtf8(playbackButtonStyle) + QStringLiteral("QPushButton { color: %1; }").arg(color));
+    button->setStyleSheet(QString::fromUtf8(playbackButtonStyle));
+
+    auto *layout = new QVBoxLayout(button);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto *iconLabel = new QLabel(button);
+    iconLabel->setObjectName(QStringLiteral("playbackButtonIcon"));
+    iconLabel->setFixedSize(24, 24);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->setPixmap(pixmap);
+    iconLabel->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    layout->addWidget(iconLabel, 0, Qt::AlignCenter);
+
     return button;
+}
+
+QLabel *makePlaybackIconLabel(const QPixmap &pixmap, QWidget *parent)
+{
+    auto *label = new QLabel(parent);
+    label->setFixedSize(24, 24);
+    label->setPixmap(pixmap);
+    label->setAlignment(Qt::AlignCenter);
+    label->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    label->setAttribute(Qt::WA_TransparentForMouseEvents);
+    return label;
+}
+
+void enableMouseTrackingTree(QWidget *widget)
+{
+    if (widget == nullptr) {
+        return;
+    }
+
+    widget->setMouseTracking(true);
+    const auto children = widget->findChildren<QWidget *>();
+    for (auto *child : children) {
+        child->setMouseTracking(true);
+    }
 }
 
 QSlider *makePlaybackSlider(QWidget *parent)
@@ -447,10 +623,14 @@ MainWindow::MainWindow(QWidget *parent)
     statsOverlayTimer_ = new QTimer(this);
     statsOverlayTimer_->setInterval(500);
     connect(statsOverlayTimer_, &QTimer::timeout, this, [this]() { updateStatsOverlay(); });
+
+    qApp->installEventFilter(this);
 }
 
 MainWindow::~MainWindow()
 {
+    qApp->removeEventFilter(this);
+    uninhibitScreenSaver();
     if (captureSession_ && captureThread_ && captureThread_->isRunning()) {
         QMetaObject::invokeMethod(
             captureSession_.get(), &capture::CaptureSession::stop, Qt::BlockingQueuedConnection);
@@ -464,9 +644,13 @@ MainWindow::~MainWindow()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == centralWidget() && playbackControls_ && event->type() == QEvent::MouseMove) {
-        showPlaybackControls();
-        resetPlaybackControlsTimer();
+    if (playbackControls_ && event->type() == QEvent::MouseMove) {
+        if (auto *widget = qobject_cast<QWidget *>(watched); widget != nullptr) {
+            if (widget == this || isAncestorOf(widget)) {
+                showPlaybackControls();
+                resetPlaybackControlsTimer();
+            }
+        }
     }
 
     return QMainWindow::eventFilter(watched, event);
@@ -658,6 +842,7 @@ void MainWindow::buildStoppedState()
 void MainWindow::startPlayback()
 {
     showConnectingState();
+    inhibitScreenSaver();
 
     if (selectedDevice_.devicePath.startsWith(QStringLiteral("mock://"))) {
         QTimer::singleShot(700, this, [this]() { showPlaybackState(); });
@@ -796,11 +981,10 @@ void MainWindow::showPlaybackState(QImage firstFrame)
 {
     auto *root = new QWidget(this);
     root->setStyleSheet(QStringLiteral("background-color: black;"));
-    root->setMouseTracking(true);
-    root->installEventFilter(this);
 
     auto *layout = new QVBoxLayout(root);
-    layout->setContentsMargins(24, 24, 24, 32);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
     auto *video = new VideoSurface(root);
     videoSurface_ = video;
@@ -821,7 +1005,7 @@ void MainWindow::showPlaybackState(QImage firstFrame)
 
     layout->addWidget(video, 1);
 
-    auto *controls = new QFrame(root);
+    auto *controls = new QFrame(video);
     controls->setFixedHeight(58);
     controls->setStyleSheet(QStringLiteral(
         "QFrame { background-color: rgba(34, 34, 34, 221); "
@@ -831,16 +1015,19 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     controlsLayout->setContentsMargins(12, 4, 12, 4);
     controlsLayout->setSpacing(10);
 
-    auto *powerButton = makePlaybackCircleButton(QStringLiteral("P"), QStringLiteral("#ff453a"), controls);
-    auto *volumeButton = makePlaybackCircleButton(QStringLiteral("V"), QStringLiteral("white"), controls);
-    auto *zoomOut = new QLabel(QStringLiteral("-"), controls);
-    auto *zoomIn = new QLabel(QStringLiteral("+"), controls);
-    auto *settingsButton = makePlaybackCircleButton(QStringLiteral("S"), QStringLiteral("white"), controls);
+    const auto whiteIcon = QColor(Qt::white);
+    const auto powerIcon = renderIconPixmap(QStringLiteral(":/icons/power.svg"), QColor(QStringLiteral("#ff453a")), 24);
+    const auto volumeOnIcon = renderIconPixmap(QStringLiteral(":/icons/volume-2.svg"), whiteIcon, 24);
+    const auto volumeOffIcon = renderIconPixmap(QStringLiteral(":/icons/volume-off.svg"), whiteIcon, 24);
+    const auto zoomOutIcon = renderIconPixmap(QStringLiteral(":/icons/zoom-out.svg"), whiteIcon, 22);
+    const auto zoomInIcon = renderIconPixmap(QStringLiteral(":/icons/zoom-in.svg"), whiteIcon, 22);
+    const auto settingsIcon = renderIconPixmap(QStringLiteral(":/icons/settings.svg"), whiteIcon, 24);
 
-    zoomOut->setAlignment(Qt::AlignCenter);
-    zoomIn->setAlignment(Qt::AlignCenter);
-    zoomOut->setStyleSheet(QStringLiteral("color: white; font-size: 40px; font-weight: 300; border: none;"));
-    zoomIn->setStyleSheet(QStringLiteral("color: white; font-size: 34px; font-weight: 300; border: none;"));
+    auto *powerButton = makePlaybackCircleButton(powerIcon, controls);
+    auto *volumeButton = makePlaybackCircleButton(volumeOnIcon, controls);
+    auto *zoomOut = makePlaybackIconLabel(zoomOutIcon, controls);
+    auto *zoomIn = makePlaybackIconLabel(zoomInIcon, controls);
+    auto *settingsButton = makePlaybackCircleButton(settingsIcon, controls);
 
     auto *volumeSlider = makePlaybackSlider(controls);
     volumeSlider->setValue(settings_.volumePercent());
@@ -853,6 +1040,10 @@ void MainWindow::showPlaybackState(QImage firstFrame)
         settings_.setVolumePercent(value);
         resetPlaybackControlsTimer();
     });
+    connect(volumeSlider, &QSlider::valueChanged, volumeButton, [volumeButton, volumeOnIcon, volumeOffIcon](const int value) {
+        setPlaybackButtonPixmap(volumeButton, value <= 0 ? volumeOffIcon : volumeOnIcon);
+    });
+    setPlaybackButtonPixmap(volumeButton, volumeSlider->value() <= 0 ? volumeOffIcon : volumeOnIcon);
 
     controlsLayout->addWidget(powerButton);
     controlsLayout->addWidget(makeBarDivider(controls));
@@ -865,8 +1056,9 @@ void MainWindow::showPlaybackState(QImage firstFrame)
     controlsLayout->addWidget(makeBarDivider(controls));
     controlsLayout->addWidget(settingsButton);
 
-    layout->addWidget(controls, 0, Qt::AlignHCenter | Qt::AlignBottom);
     playbackControls_ = controls;
+    video->setControlsOverlay(controls);
+    enableMouseTrackingTree(root);
     setCentralWidget(root);
     if (!firstFrame.isNull()) {
         updateVideoFrame(std::move(firstFrame));
@@ -1001,6 +1193,8 @@ void MainWindow::preconfigureSelectedFormat(const bool force)
 
 void MainWindow::stopPlayback()
 {
+    uninhibitScreenSaver();
+
     if (captureSession_) {
         if (captureThread_ && captureThread_->isRunning()) {
             QMetaObject::invokeMethod(
@@ -1026,6 +1220,8 @@ void MainWindow::stopPlayback()
 
 void MainWindow::stopPlaybackAsync()
 {
+    uninhibitScreenSaver();
+
     auto *session = captureSession_.release();
     auto *thread = captureThread_;
     captureThread_ = nullptr;
@@ -1084,6 +1280,21 @@ void MainWindow::resetPlaybackControlsTimer()
 {
     if (controlsHideTimer_ != nullptr && playbackControls_) {
         controlsHideTimer_->start();
+    }
+}
+
+void MainWindow::inhibitScreenSaver()
+{
+    if (!screenInhibitor_) {
+        screenInhibitor_ = std::make_unique<ScreenInhibitor>();
+    }
+    screenInhibitor_->inhibit(windowHandle());
+}
+
+void MainWindow::uninhibitScreenSaver()
+{
+    if (screenInhibitor_) {
+        screenInhibitor_->uninhibit();
     }
 }
 
