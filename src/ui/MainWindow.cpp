@@ -78,6 +78,7 @@
 #include <utility>
 #include <unistd.h>
 #include <array>
+#include <atomic>
 #include <set>
 #include <vector>
 
@@ -574,6 +575,7 @@ public:
         renderWindow_ = new GpuRenderWindow();
         renderContainer_ = QWidget::createWindowContainer(renderWindow_, this);
         renderContainer_->setGeometry(rect());
+        renderContainer_->show();
         renderContainer_->lower();
 
         renderThread_ = new VideoRenderThread(renderWindow_, this);
@@ -627,6 +629,12 @@ public:
         dmaCpuFallbackHandler_ = std::move(handler);
     }
 
+    // Thread-safe: enqueue a DMA frame directly on the render thread (no UI event loop).
+    void submitDmaFrame(capture::DmaBufFrameHandle frame)
+    {
+        renderThread_->enqueueFrame(std::move(frame));
+    }
+
     void releaseDmaGlState()
     {
         if (renderThread_->isRunning()) {
@@ -658,7 +666,7 @@ public:
     {
         cpuFrame_.reset();
         if (renderContainer_) renderContainer_->show();
-        renderThread_->enqueueFrame(std::move(frame));
+        submitDmaFrame(std::move(frame));
     }
 
     int takePaintCount() override
@@ -821,18 +829,22 @@ public:
 
     void setPendingFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
     {
-        pendingDmaFrame_.reset();
         pendingCapturedAtNs_ = capturedAtNs;
         pendingFrame_ = std::move(frame);
         schedulePresent();
     }
 
-    void setPendingDmaFrame(capture::DmaBufFrameHandle frame)
+    // Thread-safe: deliver a DMA frame straight to the render thread.
+    void submitDmaFrame(capture::DmaBufFrameHandle frame)
     {
-        pendingFrame_.reset();
-        pendingCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
-        pendingDmaFrame_ = std::move(frame);
-        schedulePresent();
+        if (!frame) {
+            return;
+        }
+        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
+            gpu->submitDmaFrame(std::move(frame));
+            presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
+            uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     void setDmaGlFailedHandler(GpuFrameRenderer::DmaGlFailedHandler handler)
@@ -853,9 +865,7 @@ public:
 
     int takeUiFrameCount()
     {
-        const auto count = uiFrameCount_;
-        uiFrameCount_ = 0;
-        return count;
+        return uiFrameCount_.exchange(0, std::memory_order_relaxed);
     }
 
     void setOverlay(QWidget *overlay)
@@ -877,15 +887,12 @@ public:
 
     void takePresentPathCounts(int &dmaPresents, int &cpuPresents)
     {
-        dmaPresents = presentDmaCount_;
-        cpuPresents = presentCpuCount_;
-        presentDmaCount_ = 0;
-        presentCpuCount_ = 0;
+        dmaPresents = presentDmaCount_.exchange(0, std::memory_order_relaxed);
+        cpuPresents = presentCpuCount_.exchange(0, std::memory_order_relaxed);
     }
 
     void releasePlaybackFrames()
     {
-        pendingDmaFrame_.reset();
         pendingFrame_.reset();
         if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
             gpu->releaseDmaGlState();
@@ -913,13 +920,6 @@ private:
 
     void schedulePresent()
     {
-        if (pendingDmaFrame_) {
-            renderer_->setDmaFrame(std::move(pendingDmaFrame_));
-            ++presentDmaCount_;
-            ++uiFrameCount_;
-            return;
-        }
-
         if (!pendingFrame_ || pendingFrame_->isNull()) {
             pendingFrame_.reset();
             return;
@@ -927,8 +927,8 @@ private:
 
         setFrame(std::move(pendingFrame_), pendingCapturedAtNs_);
         pendingCapturedAtNs_ = 0;
-        ++presentCpuCount_;
-        ++uiFrameCount_;
+        presentCpuCount_.fetch_add(1, std::memory_order_relaxed);
+        uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
     }
 
     void positionOverlays()
@@ -970,14 +970,13 @@ private:
     GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     FrameRenderer::FramePresentedHandler framePresentedHandler_;
     capture::FrameHandle pendingFrame_;
-    capture::DmaBufFrameHandle pendingDmaFrame_;
     qint64 pendingCapturedAtNs_ = 0;
     QPointer<QLabel> startupOverlay_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
-    int uiFrameCount_ = 0;
-    int presentDmaCount_ = 0;
-    int presentCpuCount_ = 0;
+    std::atomic<int> uiFrameCount_{0};
+    std::atomic<int> presentDmaCount_{0};
+    std::atomic<int> presentCpuCount_{0};
 };
 
 
@@ -1521,7 +1520,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 void MainWindow::buildStoppedState()
 {
-    playbackStopping_ = false;
+    playbackStopping_.store(false, std::memory_order_release);
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
@@ -1811,7 +1810,7 @@ void MainWindow::buildStoppedState()
 
 void MainWindow::startPlayback()
 {
-    if (playbackStopping_) {
+    if (playbackStopping_.load(std::memory_order_acquire)) {
         return;
     }
     if (selectedDevice_.devicePath.isEmpty()) {
@@ -1879,7 +1878,7 @@ void MainWindow::startPlayback()
         &capture::CaptureSession::frameReady,
         this,
         [this](capture::FrameHandle frame, const qint64 capturedAtNs) {
-            if (playbackStopping_) {
+            if (playbackStopping_.load(std::memory_order_acquire)) {
                 return;
             }
             if (!frame || frame->isNull()) {
@@ -1891,20 +1890,39 @@ void MainWindow::startPlayback()
             }
             updateVideoFrame(std::move(frame), capturedAtNs);
         });
-    connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
-        if (playbackStopping_) {
-            return;
-        }
-        if (!frame) {
-            return;
-        }
-        if (!videoSurface_) {
-            showPlaybackState({});
-        }
-        updateVideoDmaFrame(std::move(frame));
-    });
+    connect(
+        captureSession_.get(),
+        &capture::CaptureSession::dmaFrameReady,
+        this,
+        [this](capture::DmaBufFrameHandle frame) {
+            if (playbackStopping_.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (!frame) {
+                return;
+            }
+            if (auto *surface = dmaVideoSurface_.load(std::memory_order_acquire)) {
+                surface->submitDmaFrame(std::move(frame));
+                return;
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, frame = std::move(frame)]() mutable {
+                    if (playbackStopping_.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    if (!videoSurface_) {
+                        showPlaybackState({});
+                    }
+                    if (auto *surface = dmaVideoSurface_.load(std::memory_order_acquire)) {
+                        surface->submitDmaFrame(std::move(frame));
+                    }
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::DirectConnection);
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
-        if (playbackStopping_) {
+        if (playbackStopping_.load(std::memory_order_acquire)) {
             return;
         }
         logCaptureStartup("failed", message);
@@ -2005,6 +2023,7 @@ void MainWindow::showStoppingState()
     }
     playbackControls_.clear();
     statsOverlay_.clear();
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     latestTelemetry_ = {};
     cachedStatsOverlayText_.clear();
@@ -2047,6 +2066,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     auto *video = new VideoSurface(root);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
+    dmaVideoSurface_.store(video, std::memory_order_release);
     video->setFramePresentedHandler([this](const qint64 latencyNs) { recordPresentLatency(latencyNs); });
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
@@ -2152,7 +2172,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
 
 void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 capturedAtNs)
 {
-    if (playbackStopping_) {
+    if (playbackStopping_.load(std::memory_order_acquire)) {
         return;
     }
     if (!videoSurface_ || !frame || frame->isNull()) {
@@ -2189,18 +2209,6 @@ void MainWindow::recordPresentLatency(const qint64 latencyNs)
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
     refreshStatsOverlayCache();
-}
-
-void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
-{
-    if (playbackStopping_) {
-        return;
-    }
-    if (!videoSurface_ || !frame) {
-        return;
-    }
-
-    videoSurface_->setPendingDmaFrame(std::move(frame));
 }
 
 void MainWindow::updateStatsOverlay()
@@ -2362,7 +2370,8 @@ void MainWindow::preconfigureSelectedFormat(const bool force)
 
 void MainWindow::refreshStartupDevices()
 {
-    if (captureSession_ || playbackControls_ || videoSurface_ || playbackStopping_) {
+    if (captureSession_ || playbackControls_ || videoSurface_ ||
+        playbackStopping_.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -2378,7 +2387,8 @@ void MainWindow::refreshStartupDevices()
 void MainWindow::stopPlayback()
 {
     uninhibitScreenSaver();
-    playbackStopping_ = false;
+    playbackStopping_.store(false, std::memory_order_release);
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     if (audioSession_) {
         audioSession_->stop();
         audioSession_.reset();
@@ -2425,16 +2435,18 @@ void MainWindow::stopPlayback()
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
     statsOverlay_.clear();
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     buildStoppedState();
 }
 
 void MainWindow::stopPlaybackAsync()
 {
-    if (playbackStopping_) {
+    if (playbackStopping_.load(std::memory_order_acquire)) {
         return;
     }
-    playbackStopping_ = true;
+    playbackStopping_.store(true, std::memory_order_release);
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     uninhibitScreenSaver();
     if (playbackControls_) {
         playbackControls_->setEnabled(false);
@@ -2494,13 +2506,15 @@ void MainWindow::stopPlaybackAsync()
         delete thread;
     }
 
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     finishPlaybackStopped();
 }
 
 void MainWindow::finishPlaybackStopped()
 {
-    playbackStopping_ = false;
+    playbackStopping_.store(false, std::memory_order_release);
+    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     captureThread_ = nullptr;
     captureSession_.reset();
     buildStoppedState();

@@ -9,6 +9,7 @@
 #include <QMainWindow>
 #include <QPointer>
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -41,7 +42,6 @@ private:
     void showPlaybackState(capture::FrameHandle firstFrame = {});
     void updateVideoFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0);
     void recordPresentLatency(qint64 latencyNs);
-    void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
     void updateStatsOverlay();
     void refreshStatsOverlayCache();
     [[nodiscard]] QString formatStatsOverlayText() const;
@@ -79,7 +79,8 @@ private:
     int presentLagSampleCount_ = 0;
     qint64 presentLagTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
-    bool playbackStopping_ = false;
+    std::atomic<bool> playbackStopping_{false};
+    std::atomic<VideoSurface *> dmaVideoSurface_{nullptr};
     std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     std::unique_ptr<ScreenInhibitor> screenInhibitor_;
