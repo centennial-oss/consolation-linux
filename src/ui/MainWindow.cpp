@@ -43,6 +43,7 @@
 #include <QMetaType>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QOpenGLWidget>
 #include <QPainter>
 #include <QPaintEvent>
@@ -65,7 +66,9 @@
 
 #include <cerrno>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
@@ -292,15 +295,317 @@ private:
     int paintCount_ = 0;
 };
 
-class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
+// QWindow subclass that provides the OpenGL surface for the dedicated render thread.
+class GpuRenderWindow final : public QWindow {
+    Q_OBJECT
+public:
+    GpuRenderWindow()
+    {
+        setSurfaceType(QSurface::OpenGLSurface);
+        QSurfaceFormat fmt;
+        fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+        fmt.setDepthBufferSize(0);
+        fmt.setStencilBufferSize(0);
+        setFormat(fmt);
+    }
+
+signals:
+    void windowExposed();
+    void windowResized(QSize size, float dpr);
+
+protected:
+    void exposeEvent(QExposeEvent *) override
+    {
+        if (isExposed()) {
+            emit windowExposed();
+        }
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWindow::resizeEvent(event);
+        emit windowResized(size(), static_cast<float>(devicePixelRatio()));
+    }
+};
+
+// Dedicated render thread that owns the GL context and DMA-BUF renderers.
+// Receives frames via a single-slot mutex+condvar queue — no Qt event queue on the hot path.
+class VideoRenderThread final : public QThread {
+    Q_OBJECT
+public:
+    explicit VideoRenderThread(GpuRenderWindow *window, QObject *parent = nullptr)
+        : QThread(parent)
+        , window_(window)
+    {}
+
+    ~VideoRenderThread() override
+    {
+        requestStop();
+        wait();
+    }
+
+    // Thread-safe: called from any thread to deliver a frame to the render loop.
+    void enqueueFrame(capture::DmaBufFrameHandle frame)
+    {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            pendingFrame_ = std::move(frame);
+        }
+        cv_.notify_one();
+    }
+
+    // Thread-safe: called from UI thread on resize.
+    void notifyResize(const QSize size, const float dpr)
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        windowSize_ = size;
+        dpr_ = dpr;
+    }
+
+    // Thread-safe: signals the render loop to exit.
+    void requestStop()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            stopping_ = true;
+        }
+        cv_.notify_one();
+    }
+
+    int takePaintCount()
+    {
+        return paintCount_.exchange(0);
+    }
+
+signals:
+    void firstFramePainted();
+    void framePresented(qint64 latencyNs);
+    void dmaCpuFallback(capture::DmaBufFrameHandle frame);
+
+protected:
+    void run() override
+    {
+        QOpenGLContext context;
+        context.setFormat(window_->format());
+        if (!context.create()) {
+            std::cout << "[VideoRenderThread] failed to create GL context" << std::endl;
+            std::cout.flush();
+            return;
+        }
+        if (!context.makeCurrent(window_)) {
+            std::cout << "[VideoRenderThread] failed to make GL context current" << std::endl;
+            std::cout.flush();
+            return;
+        }
+
+        QOpenGLFunctions gl;
+        gl.initializeOpenGLFunctions();
+
+        nv12Gl_.emplace();
+        if (!nv12Gl_->initialize()) {
+            std::cout << "[VideoRenderThread] NV12 DMA-BUF GL unavailable ("
+                      << nv12Gl_->lastInitFailure().toStdString() << "); NV12 will use CPU decode" << std::endl;
+            nv12Gl_.reset();
+        }
+        rgbGl_.emplace();
+        if (!rgbGl_->initialize()) {
+            std::cout << "[VideoRenderThread] RGB/BGR DMA-BUF GL unavailable ("
+                      << rgbGl_->lastInitFailure().toStdString() << "); RGB24/BGR24 will use CPU decode" << std::endl;
+            rgbGl_.reset();
+        }
+        yuyvGl_.emplace();
+        if (!yuyvGl_->initialize()) {
+            std::cout << "[VideoRenderThread] YUYV DMA-BUF GL unavailable ("
+                      << yuyvGl_->lastInitFailure().toStdString() << "); YUYV/YUY2 will use CPU decode" << std::endl;
+            yuyvGl_.reset();
+        }
+        i420Gl_.emplace();
+        if (!i420Gl_->initialize()) {
+            std::cout << "[VideoRenderThread] I420/YV12 DMA-BUF GL unavailable ("
+                      << i420Gl_->lastInitFailure().toStdString() << "); YU12/I420/YV12 will use CPU decode" << std::endl;
+            i420Gl_.reset();
+        }
+        std::cout.flush();
+
+        while (true) {
+            capture::DmaBufFrameHandle frame;
+            QSize windowSize;
+            float dpr = 1.0f;
+            {
+                std::unique_lock<std::mutex> lk(mutex_);
+                cv_.wait(lk, [this] { return pendingFrame_ || stopping_; });
+                if (stopping_) break;
+                frame = std::move(pendingFrame_);
+                windowSize = windowSize_;
+                dpr = dpr_;
+            }
+
+            if (!frame) continue;
+
+            if (!tryRenderFrame(frame, windowSize, dpr, gl)) {
+                boundDmaFrame_.reset();
+                emit dmaCpuFallback(std::move(frame));
+            } else {
+                context.swapBuffers(window_);
+                ++paintCount_;
+            }
+        }
+
+        if (nv12Gl_.has_value()) { nv12Gl_->releaseAllSlots(); nv12Gl_->shutdown(); nv12Gl_.reset(); }
+        if (rgbGl_.has_value()) { rgbGl_->releaseAllSlots(); rgbGl_->shutdown(); rgbGl_.reset(); }
+        if (yuyvGl_.has_value()) { yuyvGl_->releaseAllSlots(); yuyvGl_->shutdown(); yuyvGl_.reset(); }
+        if (i420Gl_.has_value()) { i420Gl_->releaseAllSlots(); i420Gl_->shutdown(); i420Gl_.reset(); }
+        context.doneCurrent();
+    }
+
+private:
+    bool tryRenderFrame(const capture::DmaBufFrameHandle &frame,
+                        const QSize windowSize, const float dpr,
+                        QOpenGLFunctions &gl)
+    {
+        if (!frame) return false;
+
+        platform::linux::DmaBufReadGuard syncGuard(frame->dmaFd);
+        if (!syncGuard.started()) return false;
+
+        const auto targetRect = computeTargetRect(frame, windowSize);
+        gl.glViewport(0, 0,
+                      static_cast<GLsizei>(windowSize.width() * dpr),
+                      static_cast<GLsizei>(windowSize.height() * dpr));
+
+        bool rendered = false;
+        if (frame->layout == capture::DmaBufLayout::Nv12) {
+            if (!nv12Gl_ || !nv12Gl_->isAvailable()) return false;
+            if (boundDmaFrame_ != frame) {
+                if (!nv12Gl_->bindFrame(frame)) { boundDmaFrame_.reset(); return false; }
+                boundDmaFrame_ = frame;
+            }
+            nv12Gl_->draw(windowSize, targetRect, dpr);
+            rendered = true;
+        } else if (frame->layout == capture::DmaBufLayout::Rgb888 ||
+                   frame->layout == capture::DmaBufLayout::Bgr888) {
+            if (!rgbGl_ || !rgbGl_->isAvailable()) return false;
+            if (boundDmaFrame_ != frame) {
+                if (!rgbGl_->bindFrame(frame)) { boundDmaFrame_.reset(); return false; }
+                boundDmaFrame_ = frame;
+            }
+            rgbGl_->draw(windowSize, targetRect, dpr);
+            rendered = true;
+        } else if (frame->layout == capture::DmaBufLayout::Yuyv422) {
+            if (!yuyvGl_ || !yuyvGl_->isAvailable()) return false;
+            if (boundDmaFrame_ != frame) {
+                if (!yuyvGl_->bindFrame(frame)) { boundDmaFrame_.reset(); return false; }
+                boundDmaFrame_ = frame;
+            }
+            yuyvGl_->draw(windowSize, targetRect, dpr);
+            rendered = true;
+        } else if (frame->layout == capture::DmaBufLayout::I420 ||
+                   frame->layout == capture::DmaBufLayout::Yv12) {
+            if (!i420Gl_ || !i420Gl_->isAvailable()) return false;
+            if (boundDmaFrame_ != frame) {
+                if (!i420Gl_->bindFrame(frame)) { boundDmaFrame_.reset(); return false; }
+                boundDmaFrame_ = frame;
+            }
+            i420Gl_->draw(windowSize, targetRect, dpr);
+            rendered = true;
+        }
+
+        if (!rendered) return false;
+
+        if (!firstFramePainted_) {
+            firstFramePainted_ = true;
+            emit firstFramePainted();
+        }
+        if (frame->capturedAtNs > 0) {
+            emit framePresented(capture::monotonicClockNs() - frame->capturedAtNs);
+        }
+        return true;
+    }
+
+    QRect computeTargetRect(const capture::DmaBufFrameHandle &frame, const QSize windowSize) const
+    {
+        QSize srcSize(frame->width, frame->height);
+        auto targetSize = srcSize;
+        targetSize.scale(windowSize, Qt::KeepAspectRatio);
+        return QRect(
+            QPoint((windowSize.width() - targetSize.width()) / 2,
+                   (windowSize.height() - targetSize.height()) / 2),
+            targetSize);
+    }
+
+    GpuRenderWindow *window_;
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    capture::DmaBufFrameHandle pendingFrame_;
+    QSize windowSize_;
+    float dpr_ = 1.0f;
+    bool stopping_ = false;
+
+    std::atomic<int> paintCount_{0};
+    bool firstFramePainted_ = false;
+
+    std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
+    std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
+    std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
+    std::optional<platform::linux::I420DmaBufGl> i420Gl_;
+    capture::DmaBufFrameHandle boundDmaFrame_;
+};
+
+class GpuFrameRenderer final : public QWidget, public FrameRenderer {
 public:
     using DmaGlFailedHandler = std::function<void()>;
     using DmaCpuFallbackHandler = std::function<void(capture::DmaBufFrameHandle)>;
 
     explicit GpuFrameRenderer(QWidget *parent = nullptr)
-        : QOpenGLWidget(parent)
+        : QWidget(parent)
     {
         setAutoFillBackground(false);
+
+        renderWindow_ = new GpuRenderWindow();
+        renderContainer_ = QWidget::createWindowContainer(renderWindow_, this);
+        renderContainer_->setGeometry(rect());
+        renderContainer_->lower();
+
+        renderThread_ = new VideoRenderThread(renderWindow_, this);
+
+        connect(renderWindow_, &GpuRenderWindow::windowExposed, this, [this]() {
+            if (!renderThread_->isRunning()) {
+                renderThread_->notifyResize(renderWindow_->size(),
+                                            static_cast<float>(renderWindow_->devicePixelRatio()));
+                renderThread_->start();
+            }
+        });
+
+        connect(renderWindow_, &GpuRenderWindow::windowResized, this, [this](QSize size, float dpr) {
+            renderThread_->notifyResize(size, dpr);
+        });
+
+        connect(renderThread_, &VideoRenderThread::firstFramePainted, this, [this]() {
+            if (!firstFramePainted_ && firstFramePaintedHandler_) {
+                firstFramePainted_ = true;
+                firstFramePaintedHandler_();
+            }
+        });
+
+        connect(renderThread_, &VideoRenderThread::framePresented, this, [this](const qint64 latencyNs) {
+            if (framePresentedHandler_) {
+                framePresentedHandler_(latencyNs);
+            }
+        });
+
+        connect(renderThread_, &VideoRenderThread::dmaCpuFallback, this,
+                [this](capture::DmaBufFrameHandle frame) {
+                    if (dmaCpuFallbackHandler_) {
+                        dmaCpuFallbackHandler_(std::move(frame));
+                    }
+                });
+    }
+
+    ~GpuFrameRenderer() override
+    {
+        renderThread_->requestStop();
+        renderThread_->wait();
     }
 
     void setDmaGlFailedHandler(DmaGlFailedHandler handler)
@@ -315,55 +620,9 @@ public:
 
     void releaseDmaGlState()
     {
-        dmaFrame_.reset();
-        boundDmaFrame_.reset();
-        if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
-            return;
-        }
-
-        if (context() != nullptr && context()->isValid()) {
-            makeCurrent();
-            if (nv12Gl_.has_value()) {
-                nv12Gl_->releaseAllSlots();
-                nv12Gl_->releaseFrame();
-            }
-            if (rgbGl_.has_value()) {
-                rgbGl_->releaseAllSlots();
-                rgbGl_->releaseFrame();
-            }
-            if (yuyvGl_.has_value()) {
-                yuyvGl_->releaseAllSlots();
-                yuyvGl_->releaseFrame();
-            }
-            if (i420Gl_.has_value()) {
-                i420Gl_->releaseAllSlots();
-                i420Gl_->releaseFrame();
-            }
-            doneCurrent();
-        }
-    }
-
-    ~GpuFrameRenderer() override
-    {
-        if (context() != nullptr && context()->isValid()) {
-            makeCurrent();
-            if (nv12Gl_.has_value()) {
-                nv12Gl_->shutdown();
-                nv12Gl_.reset();
-            }
-            if (rgbGl_.has_value()) {
-                rgbGl_->shutdown();
-                rgbGl_.reset();
-            }
-            if (yuyvGl_.has_value()) {
-                yuyvGl_->shutdown();
-                yuyvGl_.reset();
-            }
-            if (i420Gl_.has_value()) {
-                i420Gl_->shutdown();
-                i420Gl_.reset();
-            }
-            doneCurrent();
+        if (renderThread_->isRunning()) {
+            renderThread_->requestStop();
+            renderThread_->wait();
         }
     }
 
@@ -379,309 +638,81 @@ public:
 
     void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
     {
-        dmaFrame_.reset();
-        boundDmaFrame_.reset();
-        if (nv12Gl_.has_value()) {
-            nv12Gl_->releaseFrame();
-        }
-        if (rgbGl_.has_value()) {
-            rgbGl_->releaseFrame();
-        }
-        if (yuyvGl_.has_value()) {
-            yuyvGl_->releaseFrame();
-        }
-        if (i420Gl_.has_value()) {
-            i420Gl_->releaseFrame();
-        }
+        if (renderContainer_) renderContainer_->hide();
         displayCapturedAtNs_ = capturedAtNs;
-        frame_ = std::move(frame);
-        updateTargetRect();
+        cpuFrame_ = std::move(frame);
+        updateCpuTargetRect();
         repaint();
     }
 
     void setDmaFrame(capture::DmaBufFrameHandle frame) override
     {
-        frame_.reset();
-        boundDmaFrame_.reset();
-        displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
-        dmaFrame_ = std::move(frame);
-        updateTargetRect();
-        repaint();
+        cpuFrame_.reset();
+        if (renderContainer_) renderContainer_->show();
+        renderThread_->enqueueFrame(std::move(frame));
     }
 
     int takePaintCount() override
     {
-        const auto count = paintCount_;
-        paintCount_ = 0;
-        return count;
+        return renderThread_->takePaintCount() + std::exchange(cpuPaintCount_, 0);
     }
 
 protected:
-    void initializeGL() override
-    {
-        nv12Gl_.emplace();
-        if (!nv12Gl_->initialize()) {
-            const auto reason = nv12Gl_->lastInitFailure();
-            nv12Gl_.reset();
-            std::cout << "[MainWindow capture] NV12 DMA-BUF GL import unavailable";
-            if (!reason.isEmpty()) {
-                std::cout << " (" << reason.toStdString() << ")";
-            }
-            std::cout << "; NV12 will use libyuv CPU decode" << std::endl;
-            std::cout.flush();
-        }
-
-        rgbGl_.emplace();
-        if (!rgbGl_->initialize()) {
-            const auto reason = rgbGl_->lastInitFailure();
-            rgbGl_.reset();
-            std::cout << "[MainWindow capture] RGB/BGR DMA-BUF GL import unavailable";
-            if (!reason.isEmpty()) {
-                std::cout << " (" << reason.toStdString() << ")";
-            }
-            std::cout << "; RGB24/BGR24 will use libyuv CPU decode" << std::endl;
-            std::cout.flush();
-        }
-
-        yuyvGl_.emplace();
-        if (!yuyvGl_->initialize()) {
-            const auto reason = yuyvGl_->lastInitFailure();
-            yuyvGl_.reset();
-            std::cout << "[MainWindow capture] YUYV DMA-BUF GL import unavailable";
-            if (!reason.isEmpty()) {
-                std::cout << " (" << reason.toStdString() << ")";
-            }
-            std::cout << "; YUYV/YUY2 will use libyuv CPU decode" << std::endl;
-            std::cout.flush();
-        }
-
-        i420Gl_.emplace();
-        if (!i420Gl_->initialize()) {
-            const auto reason = i420Gl_->lastInitFailure();
-            i420Gl_.reset();
-            std::cout << "[MainWindow capture] I420/YV12 DMA-BUF GL import unavailable";
-            if (!reason.isEmpty()) {
-                std::cout << " (" << reason.toStdString() << ")";
-            }
-            std::cout << "; YU12/I420/YV12 will use libyuv CPU decode" << std::endl;
-            std::cout.flush();
-        }
-    }
-
-    void paintGL() override
-    {
-        ++paintCount_;
-        if (dmaFrame_) {
-            if (tryPaintDmaFrame()) {
-                return;
-            }
-            auto failedFrame = std::move(dmaFrame_);
-            if (dmaCpuFallbackHandler_) {
-                dmaCpuFallbackHandler_(std::move(failedFrame));
-            } else {
-                failedFrame.reset();
-            }
-            return;
-        }
-
-        if (frame_ && !frame_->isNull()) {
-            QPainter painter(this);
-            paintCpuFrame(painter);
-            return;
-        }
-
-        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-
     void resizeEvent(QResizeEvent *event) override
     {
-        QOpenGLWidget::resizeEvent(event);
-        updateTargetRect();
+        QWidget::resizeEvent(event);
+        if (renderContainer_) {
+            renderContainer_->setGeometry(rect());
+        }
+        updateCpuTargetRect();
+    }
+
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+        if (!cpuFrame_ || cpuFrame_->isNull()) return;
+
+        QPainter painter(this);
+        ++cpuPaintCount_;
+        painter.fillRect(rect(), Qt::black);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (cpuTargetRect_.size() == cpuFrame_->size()) {
+            painter.drawImage(cpuTargetRect_.topLeft(), *cpuFrame_);
+        } else {
+            painter.drawImage(cpuTargetRect_, *cpuFrame_);
+        }
+        reportFramePresented();
+        if (!firstFramePainted_ && firstFramePaintedHandler_) {
+            firstFramePainted_ = true;
+            firstFramePaintedHandler_();
+        }
     }
 
 private:
-    void paintCpuFrame(QPainter &painter)
+    void updateCpuTargetRect()
     {
-        ++paintCount_;
-        painter.fillRect(rect(), Qt::black);
-        if (!frame_ || frame_->isNull()) {
+        if (!cpuFrame_ || cpuFrame_->isNull()) {
+            cpuTargetRect_ = {};
             return;
         }
-
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_->size()) {
-            painter.drawImage(targetRect_.topLeft(), *frame_);
-        } else {
-            painter.drawImage(targetRect_, *frame_);
-        }
-        reportFramePresented();
-        notifyFirstFramePainted();
-    }
-
-    void updateTargetRect()
-    {
-        QSize sourceSize;
-        if (dmaFrame_) {
-            sourceSize = QSize(dmaFrame_->width, dmaFrame_->height);
-        } else if (frame_ && !frame_->isNull()) {
-            sourceSize = frame_->size();
-        } else {
-            targetRect_ = {};
-            return;
-        }
-
-        auto targetSize = sourceSize;
+        auto targetSize = cpuFrame_->size();
         targetSize.scale(size(), Qt::KeepAspectRatio);
-        targetRect_ = QRect(
+        cpuTargetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
             targetSize);
     }
 
-    bool tryPaintDmaFrame()
-    {
-        if (!dmaFrame_) {
-            return false;
-        }
+    GpuRenderWindow *renderWindow_ = nullptr;
+    QWidget *renderContainer_ = nullptr;
+    VideoRenderThread *renderThread_ = nullptr;
 
-        platform::linux::DmaBufReadGuard dmaSync(dmaFrame_->dmaFd);
-        if (!dmaSync.started()) {
-            return false;
-        }
-
-        const auto dpr = static_cast<float>(devicePixelRatioF());
-        if (dmaFrame_->layout == capture::DmaBufLayout::Nv12) {
-            if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
-                return false;
-            }
-            if (boundDmaFrame_ != dmaFrame_) {
-                if (!nv12Gl_->bindFrame(dmaFrame_)) {
-                    static bool logged = false;
-                    if (!logged) {
-                        logged = true;
-                        std::cout << "[MainWindow capture] NV12 dma-buf bind failed: "
-                                  << nv12Gl_->lastInitFailure().toStdString() << std::endl;
-                        std::cout.flush();
-                    }
-                    boundDmaFrame_.reset();
-                    return false;
-                }
-                boundDmaFrame_ = dmaFrame_;
-            }
-            nv12Gl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            return true;
-        }
-
-        if (dmaFrame_->layout == capture::DmaBufLayout::Rgb888 ||
-            dmaFrame_->layout == capture::DmaBufLayout::Bgr888) {
-            if (!rgbGl_ || !rgbGl_->isAvailable()) {
-                return false;
-            }
-            if (boundDmaFrame_ != dmaFrame_) {
-                if (!rgbGl_->bindFrame(dmaFrame_)) {
-                    static bool logged = false;
-                    if (!logged) {
-                        logged = true;
-                        const auto reason = rgbGl_->lastBindFailure().isEmpty()
-                            ? rgbGl_->lastInitFailure()
-                            : rgbGl_->lastBindFailure();
-                        std::cout << "[MainWindow capture] RGB/BGR dma-buf bind failed: "
-                                  << reason.toStdString() << std::endl;
-                        std::cout.flush();
-                    }
-                    boundDmaFrame_.reset();
-                    return false;
-                }
-                boundDmaFrame_ = dmaFrame_;
-            }
-            rgbGl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            return true;
-        }
-
-        if (dmaFrame_->layout == capture::DmaBufLayout::Yuyv422) {
-            if (!yuyvGl_ || !yuyvGl_->isAvailable()) {
-                return false;
-            }
-            if (boundDmaFrame_ != dmaFrame_) {
-                if (!yuyvGl_->bindFrame(dmaFrame_)) {
-                    static bool logged = false;
-                    if (!logged) {
-                        logged = true;
-                        const auto reason = yuyvGl_->lastBindFailure().isEmpty()
-                            ? yuyvGl_->lastInitFailure()
-                            : yuyvGl_->lastBindFailure();
-                        std::cout << "[MainWindow capture] YUYV dma-buf bind failed: "
-                                  << reason.toStdString() << std::endl;
-                        std::cout.flush();
-                    }
-                    boundDmaFrame_.reset();
-                    return false;
-                }
-                boundDmaFrame_ = dmaFrame_;
-            }
-            yuyvGl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            return true;
-        }
-
-        if (dmaFrame_->layout == capture::DmaBufLayout::I420 ||
-            dmaFrame_->layout == capture::DmaBufLayout::Yv12) {
-            if (!i420Gl_ || !i420Gl_->isAvailable()) {
-                return false;
-            }
-            if (boundDmaFrame_ != dmaFrame_) {
-                if (!i420Gl_->bindFrame(dmaFrame_)) {
-                    static bool logged = false;
-                    if (!logged) {
-                        logged = true;
-                        const auto reason = i420Gl_->lastBindFailure().isEmpty()
-                            ? i420Gl_->lastInitFailure()
-                            : i420Gl_->lastBindFailure();
-                        std::cout << "[MainWindow capture] I420/YV12 dma-buf bind failed: "
-                                  << reason.toStdString() << std::endl;
-                        std::cout.flush();
-                    }
-                    boundDmaFrame_.reset();
-                    return false;
-                }
-                boundDmaFrame_ = dmaFrame_;
-            }
-            i420Gl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            return true;
-        }
-
-        return false;
-    }
-
-    void notifyFirstFramePainted()
-    {
-        if (firstFramePainted_ || !firstFramePaintedHandler_) {
-            return;
-        }
-        firstFramePainted_ = true;
-        firstFramePaintedHandler_();
-    }
-
-    std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
-    std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
-    std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
-    std::optional<platform::linux::I420DmaBufGl> i420Gl_;
-    capture::FrameHandle frame_;
-    capture::DmaBufFrameHandle dmaFrame_;
-    capture::DmaBufFrameHandle boundDmaFrame_;
+    capture::FrameHandle cpuFrame_;
+    QRect cpuTargetRect_;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     std::function<void()> firstFramePaintedHandler_;
-    QRect targetRect_;
     bool firstFramePainted_ = false;
-    int paintCount_ = 0;
+    int cpuPaintCount_ = 0;
 };
 
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
@@ -1423,6 +1454,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     qRegisterMetaType<capture::VideoTelemetrySnapshot>("consolation::capture::VideoTelemetrySnapshot");
+    qRegisterMetaType<capture::DmaBufFrameHandle>("consolation::capture::DmaBufFrameHandle");
 
     setWindowTitle(QStringLiteral("%1 %2").arg(
         QString::fromUtf8(consolation::app::AppMetadata::displayName),
