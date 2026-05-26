@@ -21,7 +21,6 @@ namespace consolation::platform::linux {
 namespace {
 
 constexpr qint64 telemetryWindowNs = 500'000'000;
-constexpr int maxFramesPerNotifierActivation = 4;
 
 qint64 monotonicNs()
 {
@@ -367,7 +366,13 @@ bool V4L2CaptureSession::queueBuffers()
 
 void V4L2CaptureSession::handleReadyRead()
 {
-    auto framesProcessed = 0;
+    // Drain every frame queued by the driver this wakeup, but decode/emit only the newest.
+    // Older buffers are requeued without decode to avoid redundant work and signal backlog.
+    auto havePending = false;
+    v4l2_buffer pending {};
+    pending.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    pending.memory = V4L2_MEMORY_MMAP;
+
     while (true) {
         v4l2_buffer buffer {};
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -375,36 +380,52 @@ void V4L2CaptureSession::handleReadyRead()
 
         if (xioctl(fd_, VIDIOC_DQBUF, &buffer) != 0) {
             if (errno == EAGAIN) {
-                return;
+                break;
             }
             emit failed(QStringLiteral("Could not read capture frame: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
             stop();
             return;
         }
 
-        if (buffer.index < buffers_.size()) {
-            const auto decodeStartNs = monotonicNs();
-            auto frame = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
-            const auto decodeNs = monotonicNs() - decodeStartNs;
-            if (frame && !frame->isNull()) {
-                recordDecodedFrame(static_cast<int>(buffer.bytesused), decodeNs);
-                emit frameReady(std::move(frame));
+        if (havePending) {
+            if (fd_ < 0) {
+                return; // stop() was called from within a frameReady handler; not an error
+            }
+            if (xioctl(fd_, VIDIOC_QBUF, &pending) != 0) {
+                emit failed(QStringLiteral("Could not requeue capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
+                stop();
+                return;
             }
         }
+
+        pending = buffer;
+        havePending = true;
 
         if (fd_ < 0) {
             return; // stop() was called from within a frameReady handler; not an error
         }
-        if (xioctl(fd_, VIDIOC_QBUF, &buffer) != 0) {
-            emit failed(QStringLiteral("Could not requeue capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
-            stop();
-            return;
-        }
+    }
 
-        ++framesProcessed;
-        if (framesProcessed >= maxFramesPerNotifierActivation) {
-            return;
+    if (!havePending) {
+        return;
+    }
+
+    if (pending.index < buffers_.size()) {
+        const auto decodeStartNs = monotonicNs();
+        auto frame = decodeFrame(buffers_[pending.index].start, static_cast<int>(pending.bytesused));
+        const auto decodeNs = monotonicNs() - decodeStartNs;
+        if (frame && !frame->isNull()) {
+            recordDecodedFrame(static_cast<int>(pending.bytesused), decodeNs);
+            emit frameReady(std::move(frame));
         }
+    }
+
+    if (fd_ < 0) {
+        return;
+    }
+    if (xioctl(fd_, VIDIOC_QBUF, &pending) != 0) {
+        emit failed(QStringLiteral("Could not requeue capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
+        stop();
     }
 }
 
