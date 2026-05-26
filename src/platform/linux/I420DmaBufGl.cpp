@@ -521,9 +521,23 @@ void I420DmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const 
     const auto viewportW = std::max(1, static_cast<int>(targetRect.width() * dpr));
     const auto viewportH = std::max(1, static_cast<int>(targetRect.height() * dpr));
 
-    glViewport(0, 0, deviceWidth, deviceHeight);
-    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if (viewportX > 0 || viewportY > 0) {
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glEnable(GL_SCISSOR_TEST);
+        if (viewportX > 0) {
+            glScissor(0, 0, viewportX, deviceHeight);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glScissor(viewportX + viewportW, 0, deviceWidth - viewportX - viewportW, deviceHeight);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        if (viewportY > 0) {
+            glScissor(0, 0, deviceWidth, viewportY);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glScissor(0, viewportY + viewportH, deviceWidth, deviceHeight - viewportY - viewportH);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glDisable(GL_SCISSOR_TEST);
+    }
     glViewport(viewportX, viewportY, viewportW, viewportH);
 
     glUseProgram(programId_);
