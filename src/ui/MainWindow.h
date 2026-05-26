@@ -32,10 +32,8 @@ private:
     void buildStoppedState();
     void startPlayback();
     void showConnectingState();
-    void showPlaybackState(const QImage &firstFrame = {});
-    void updateVideoFrame(const QImage &frame);
-    void scheduleVideoFrame(const QImage &frame);
-    void renderLatestVideoFrame();
+    void showPlaybackState(QImage firstFrame = {});
+    void updateVideoFrame(QImage frame);
     void updateStatsOverlay();
     QString buildStatsOverlayText() const;
     void stopPlayback();
@@ -57,11 +55,8 @@ private:
     QPointer<QLabel> statsOverlay_;
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
-    QTimer *videoRenderTimer_ = nullptr;
     QTimer *statsOverlayTimer_ = nullptr;
-    QImage latestVideoFrame_;
     capture::VideoTelemetrySnapshot latestTelemetry_;
-    int uiFramesSinceStats_ = 0;
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
     std::unique_ptr<capture::CaptureSession> captureSession_;

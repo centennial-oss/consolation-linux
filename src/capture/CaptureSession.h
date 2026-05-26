@@ -22,7 +22,7 @@ public:
     virtual void stop() = 0;
 
 signals:
-    void frameReady(const QImage &frame);
+    void frameReady(QImage frame);
     void telemetryReady(const VideoTelemetrySnapshot &snapshot);
     void failed(const QString &message);
     void logMessage(const QString &message);

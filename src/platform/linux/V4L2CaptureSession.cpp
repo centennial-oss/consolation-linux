@@ -371,11 +371,11 @@ void V4L2CaptureSession::handleReadyRead()
 
         if (buffer.index < buffers_.size()) {
             const auto decodeStartNs = monotonicNs();
-            const auto image = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
+            auto image = decodeFrame(buffers_[buffer.index].start, static_cast<int>(buffer.bytesused));
             const auto decodeNs = monotonicNs() - decodeStartNs;
             if (!image.isNull()) {
                 recordDecodedFrame(static_cast<int>(buffer.bytesused), decodeNs);
-                emit frameReady(image);
+                emit frameReady(std::move(image));
             }
         }
 

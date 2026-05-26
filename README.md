@@ -47,7 +47,7 @@ Linux capture device testing is in progress. The other Consolation ports have be
 
 - CMake 3.22 or newer
 - C++20 compiler
-- Qt 6.5 or newer development packages
+- Qt 6.4 or newer development packages
 
 See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands.
 

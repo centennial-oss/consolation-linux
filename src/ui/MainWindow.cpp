@@ -58,10 +58,27 @@ public:
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
-    void setFrame(const QImage &frame)
+    void setFrame(QImage frame)
     {
-        frame_ = frame;
+        frame_ = std::move(frame);
+        updateTargetRect();
         update();
+    }
+
+    void setPendingFrame(QImage frame)
+    {
+        pendingFrame_ = std::move(frame);
+        if (!renderQueued_) {
+            renderQueued_ = true;
+            QTimer::singleShot(16, this, [this]() { renderPendingFrame(); });
+        }
+    }
+
+    int takeUiFrameCount()
+    {
+        const auto count = uiFrameCount_;
+        uiFrameCount_ = 0;
+        return count;
     }
 
     void setOverlay(QWidget *overlay)
@@ -89,22 +106,48 @@ protected:
             return;
         }
 
-        auto targetSize = frame_.size();
-        targetSize.scale(size(), Qt::KeepAspectRatio);
-        const QRect target(
-            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
-            targetSize);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        painter.drawImage(target, frame_);
+        if (targetRect_.size() == frame_.size()) {
+            painter.drawImage(targetRect_.topLeft(), frame_);
+        } else {
+            painter.drawImage(targetRect_, frame_);
+        }
     }
 
     void resizeEvent(QResizeEvent *event) override
     {
         QWidget::resizeEvent(event);
+        updateTargetRect();
         positionOverlay();
     }
 
 private:
+    void updateTargetRect()
+    {
+        if (frame_.isNull()) {
+            targetRect_ = {};
+            return;
+        }
+
+        auto targetSize = frame_.size();
+        targetSize.scale(size(), Qt::KeepAspectRatio);
+        targetRect_ = QRect(
+            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
+            targetSize);
+    }
+
+    void renderPendingFrame()
+    {
+        renderQueued_ = false;
+        if (pendingFrame_.isNull()) {
+            return;
+        }
+
+        setFrame(std::move(pendingFrame_));
+        pendingFrame_ = {};
+        ++uiFrameCount_;
+    }
+
     void positionOverlay()
     {
         if (overlay_ == nullptr) {
@@ -123,8 +166,12 @@ private:
     }
 
     QImage frame_;
+    QImage pendingFrame_;
+    QRect targetRect_;
     QPointer<QWidget> overlay_;
     int paintCount_ = 0;
+    int uiFrameCount_ = 0;
+    bool renderQueued_ = false;
 };
 
 namespace {
@@ -397,11 +444,6 @@ MainWindow::MainWindow(QWidget *parent)
     controlsHideTimer_->setInterval(3000);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this]() { hidePlaybackControls(); });
 
-    videoRenderTimer_ = new QTimer(this);
-    videoRenderTimer_->setSingleShot(true);
-    videoRenderTimer_->setInterval(16);
-    connect(videoRenderTimer_, &QTimer::timeout, this, [this]() { renderLatestVideoFrame(); });
-
     statsOverlayTimer_ = new QTimer(this);
     statsOverlayTimer_->setInterval(500);
     connect(statsOverlayTimer_, &QTimer::timeout, this, [this]() { updateStatsOverlay(); });
@@ -434,14 +476,9 @@ void MainWindow::buildStoppedState()
 {
     playbackControls_.clear();
     statsOverlay_.clear();
-    latestVideoFrame_ = {};
     latestTelemetry_ = {};
-    uiFramesSinceStats_ = 0;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
-    if (videoRenderTimer_ != nullptr) {
-        videoRenderTimer_->stop();
-    }
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
@@ -674,12 +711,12 @@ void MainWindow::startPlayback()
     captureSession_->moveToThread(captureThread_);
     logCaptureStartup("session moved to capture thread");
 
-    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](const QImage &frame) {
+    connect(captureSession_.get(), &capture::CaptureSession::frameReady, this, [this](QImage frame) {
         if (!videoSurface_) {
-            showPlaybackState(frame);
+            showPlaybackState(std::move(frame));
             return;
         }
-        scheduleVideoFrame(frame);
+        updateVideoFrame(std::move(frame));
     });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
         logCaptureStartup("failed", message);
@@ -731,14 +768,9 @@ void MainWindow::showConnectingState()
 {
     playbackControls_.clear();
     statsOverlay_.clear();
-    latestVideoFrame_ = {};
     latestTelemetry_ = {};
-    uiFramesSinceStats_ = 0;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
-    if (videoRenderTimer_ != nullptr) {
-        videoRenderTimer_->stop();
-    }
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
@@ -760,7 +792,7 @@ void MainWindow::showConnectingState()
     setCentralWidget(root);
 }
 
-void MainWindow::showPlaybackState(const QImage &firstFrame)
+void MainWindow::showPlaybackState(QImage firstFrame)
 {
     auto *root = new QWidget(this);
     root->setStyleSheet(QStringLiteral("background-color: black;"));
@@ -837,7 +869,7 @@ void MainWindow::showPlaybackState(const QImage &firstFrame)
     playbackControls_ = controls;
     setCentralWidget(root);
     if (!firstFrame.isNull()) {
-        updateVideoFrame(firstFrame);
+        updateVideoFrame(std::move(firstFrame));
     }
     if (statsOverlayTimer_ != nullptr && showVideoStatsOverlay) {
         statsOverlayTimer_->start();
@@ -846,37 +878,13 @@ void MainWindow::showPlaybackState(const QImage &firstFrame)
     resetPlaybackControlsTimer();
 }
 
-void MainWindow::updateVideoFrame(const QImage &frame)
+void MainWindow::updateVideoFrame(QImage frame)
 {
     if (!videoSurface_ || frame.isNull()) {
         return;
     }
 
-    videoSurface_->setFrame(frame);
-    ++uiFramesSinceStats_;
-}
-
-void MainWindow::scheduleVideoFrame(const QImage &frame)
-{
-    if (frame.isNull()) {
-        return;
-    }
-
-    latestVideoFrame_ = frame;
-    if (videoRenderTimer_ != nullptr && !videoRenderTimer_->isActive()) {
-        videoRenderTimer_->start();
-    }
-}
-
-void MainWindow::renderLatestVideoFrame()
-{
-    if (latestVideoFrame_.isNull()) {
-        return;
-    }
-
-    const auto frame = latestVideoFrame_;
-    latestVideoFrame_ = {};
-    updateVideoFrame(frame);
+    videoSurface_->setPendingFrame(std::move(frame));
 }
 
 void MainWindow::updateStatsOverlay()
@@ -885,8 +893,7 @@ void MainWindow::updateStatsOverlay()
         return;
     }
 
-    uiFps_ = uiFramesSinceStats_ * 2.0;
-    uiFramesSinceStats_ = 0;
+    uiFps_ = videoSurface_ ? videoSurface_->takeUiFrameCount() * 2.0 : 0.0;
     paintFps_ = videoSurface_ ? videoSurface_->takePaintCount() * 2.0 : 0.0;
 
     if (!showVideoStatsOverlay) {

@@ -1,0 +1,69 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "ubuntu-2404",
+      "displayName": "Ubuntu 24.04",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ubuntu-2404",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "fedora-44",
+      "displayName": "Fedora 44",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-fedora-44",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "rpi-os-trixie",
+      "displayName": "Raspberry Pi OS Trixie",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-rpi-os-trixie",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ubuntu-2404",
+      "configurePreset": "ubuntu-2404"
+    },
+    {
+      "name": "fedora-44",
+      "configurePreset": "fedora-44"
+    },
+    {
+      "name": "rpi-os-trixie",
+      "configurePreset": "rpi-os-trixie"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "ubuntu-2404",
+      "configurePreset": "ubuntu-2404",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fedora-44",
+      "configurePreset": "fedora-44",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rpi-os-trixie",
+      "configurePreset": "rpi-os-trixie",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

@@ -12,7 +12,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets)
 find_path(LIBV4L2_INCLUDE_DIR NAMES libv4l2.h REQUIRED)
 find_library(LIBV4L2_LIBRARY NAMES v4l2 REQUIRED)
 
@@ -79,6 +79,34 @@ target_link_libraries(consolation
 set_target_properties(consolation PROPERTIES
     OUTPUT_NAME "consolation"
 )
+
+include(GNUInstallDirs)
+
+install(TARGETS consolation
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+set(CPACK_PACKAGE_NAME "consolation")
+set(CPACK_PACKAGE_VENDOR "Centennial OSS Inc.")
+set(CPACK_PACKAGE_CONTACT "Centennial OSS Inc.")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+
+set(CPACK_DEBIAN_PACKAGE_SECTION "video")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS
+    "libqt6core6t64 | libqt6core6, libqt6gui6t64 | libqt6gui6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
+)
+
+set(CPACK_RPM_PACKAGE_LICENSE "Apache-2.0")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
+set(CPACK_RPM_PACKAGE_REQUIRES
+    "qt6-qtbase, qt6-qtbase-gui, qt6-qtwayland"
+)
+
+include(CPack)
 
 enable_testing()
 
