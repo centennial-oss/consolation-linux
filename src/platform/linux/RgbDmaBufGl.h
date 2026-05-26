@@ -43,6 +43,7 @@ private:
     struct SlotBinding {
         int dmaFd = -1;
         capture::DmaBufLayout layout = capture::DmaBufLayout::Unknown;
+        int byteWidth = 0;
         void *eglImage = nullptr;
         unsigned int textureId = 0;
     };
@@ -59,11 +60,15 @@ private:
     unsigned int programId_ = 0;
     unsigned int vboId_ = 0;
     int frameUniform_ = -1;
+    int pixelWidthUniform_ = -1;
+    int byteWidthUniform_ = -1;
     int bgrUniform_ = -1;
     int flipUniform_ = -1;
     int activeSlot_ = -1;
     bool boundBgr_ = false;
     bool boundFlipVertical_ = false;
+    float boundPixelWidth_ = 0.0F;
+    float boundByteWidth_ = 0.0F;
     capture::DmaBufFrameHandle boundFrame_;
     std::array<SlotBinding, maxBufferSlots> slots_ {};
 };

@@ -22,11 +22,8 @@
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
 #endif
 
-#ifndef DRM_FORMAT_RGB888
-#define DRM_FORMAT_RGB888 static_cast<EGLint>(0x34324752)
-#endif
-#ifndef DRM_FORMAT_BGR888
-#define DRM_FORMAT_BGR888 static_cast<EGLint>(0x34324742)
+#ifndef DRM_FORMAT_R8
+#define DRM_FORMAT_R8 static_cast<EGLint>(0x20203852)
 #endif
 
 namespace consolation::platform::linux {
@@ -66,21 +63,33 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
     )";
 
     static constexpr char esFragmentShader[] = R"(
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+        #else
         precision mediump float;
+        #endif
         varying vec2 vTexCoord;
         uniform sampler2D uFrame;
+        uniform float uPixelWidth;
+        uniform float uByteWidth;
         uniform int uBgr;
         uniform int uFlipY;
+        float sampleByte(float byteX, float y) {
+            return texture2D(uFrame, vec2((byteX + 0.5) / uByteWidth, y)).r;
+        }
         void main() {
             vec2 tc = vTexCoord;
             if (uFlipY != 0) {
                 tc.y = 1.0 - tc.y;
             }
-            vec4 c = texture2D(uFrame, tc);
+            float base = floor(tc.x * uPixelWidth) * 3.0;
+            float b0 = sampleByte(base, tc.y);
+            float b1 = sampleByte(base + 1.0, tc.y);
+            float b2 = sampleByte(base + 2.0, tc.y);
             if (uBgr != 0) {
-                gl_FragColor = vec4(c.b, c.g, c.r, 1.0);
+                gl_FragColor = vec4(b2, b1, b0, 1.0);
             } else {
-                gl_FragColor = vec4(c.rgb, 1.0);
+                gl_FragColor = vec4(b0, b1, b2, 1.0);
             }
         }
     )";
@@ -100,19 +109,27 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         #version 330 core
         in vec2 vTexCoord;
         uniform sampler2D uFrame;
+        uniform float uPixelWidth;
+        uniform float uByteWidth;
         uniform int uBgr;
         uniform int uFlipY;
         out vec4 fragColor;
+        float sampleByte(float byteX, float y) {
+            return texture(uFrame, vec2((byteX + 0.5) / uByteWidth, y)).r;
+        }
         void main() {
             vec2 tc = vTexCoord;
             if (uFlipY != 0) {
                 tc.y = 1.0 - tc.y;
             }
-            vec4 c = texture(uFrame, tc);
+            float base = floor(tc.x * uPixelWidth) * 3.0;
+            float b0 = sampleByte(base, tc.y);
+            float b1 = sampleByte(base + 1.0, tc.y);
+            float b2 = sampleByte(base + 2.0, tc.y);
             if (uBgr != 0) {
-                fragColor = vec4(c.b, c.g, c.r, 1.0);
+                fragColor = vec4(b2, b1, b0, 1.0);
             } else {
-                fragColor = vec4(c.rgb, 1.0);
+                fragColor = vec4(b0, b1, b2, 1.0);
             }
         }
     )";
@@ -132,18 +149,26 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         #version 120
         varying vec2 vTexCoord;
         uniform sampler2D uFrame;
+        uniform float uPixelWidth;
+        uniform float uByteWidth;
         uniform int uBgr;
         uniform int uFlipY;
+        float sampleByte(float byteX, float y) {
+            return texture2D(uFrame, vec2((byteX + 0.5) / uByteWidth, y)).r;
+        }
         void main() {
             vec2 tc = vTexCoord;
             if (uFlipY != 0) {
                 tc.y = 1.0 - tc.y;
             }
-            vec4 c = texture2D(uFrame, tc);
+            float base = floor(tc.x * uPixelWidth) * 3.0;
+            float b0 = sampleByte(base, tc.y);
+            float b1 = sampleByte(base + 1.0, tc.y);
+            float b2 = sampleByte(base + 2.0, tc.y);
             if (uBgr != 0) {
-                gl_FragColor = vec4(c.b, c.g, c.r, 1.0);
+                gl_FragColor = vec4(b2, b1, b0, 1.0);
             } else {
-                gl_FragColor = vec4(c.rgb, 1.0);
+                gl_FragColor = vec4(b0, b1, b2, 1.0);
             }
         }
     )";
@@ -225,25 +250,13 @@ bool bindEglImageToTexture(const unsigned int textureId, void *const eglImage)
     }
 
     glBindTextureFn(GL_TEXTURE_2D, textureId);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glEGLImageTargetTexture2DOESFn(GL_TEXTURE_2D, static_cast<EGLImageKHR>(eglImage));
     glBindTextureFn(GL_TEXTURE_2D, 0);
     return true;
-}
-
-EGLint drmFourccForLayout(const capture::DmaBufLayout layout)
-{
-    switch (layout) {
-    case capture::DmaBufLayout::Rgb888:
-        return DRM_FORMAT_RGB888;
-    case capture::DmaBufLayout::Bgr888:
-        return DRM_FORMAT_BGR888;
-    default:
-        return 0;
-    }
 }
 
 } // namespace
@@ -330,6 +343,8 @@ bool RgbDmaBufGl::initialize()
     }
 
     frameUniform_ = glGetUniformLocation(programId_, "uFrame");
+    pixelWidthUniform_ = glGetUniformLocation(programId_, "uPixelWidth");
+    byteWidthUniform_ = glGetUniformLocation(programId_, "uByteWidth");
     bgrUniform_ = glGetUniformLocation(programId_, "uBgr");
     flipUniform_ = glGetUniformLocation(programId_, "uFlipY");
 
@@ -344,7 +359,8 @@ bool RgbDmaBufGl::initialize()
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    if (programId_ == 0 || frameUniform_ < 0 || bgrUniform_ < 0 || flipUniform_ < 0) {
+    if (programId_ == 0 || frameUniform_ < 0 || pixelWidthUniform_ < 0 || byteWidthUniform_ < 0 ||
+        bgrUniform_ < 0 || flipUniform_ < 0) {
         lastInitFailure_ = QStringLiteral("RGB shader program setup failed");
         return false;
     }
@@ -405,20 +421,16 @@ bool RgbDmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, const
     releaseSlot(bufferIndex);
     lastBindFailure_.clear();
 
-    auto fourcc = drmFourccForLayout(frame->layout);
-    if (fourcc == 0) {
-        lastBindFailure_ = QStringLiteral("unsupported RGB dma-buf layout");
+    const auto byteWidth = frame->width * 3;
+    if (byteWidth <= 0 || frame->stride < byteWidth) {
+        lastBindFailure_ = QStringLiteral("invalid RGB dma-buf stride");
         return false;
     }
 
     const auto display = static_cast<EGLDisplay>(eglDisplay_);
-    slot.eglImage = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, fourcc);
-    if (slot.eglImage == EGL_NO_IMAGE_KHR && frame->layout == capture::DmaBufLayout::Bgr888) {
-        fourcc = DRM_FORMAT_RGB888;
-        slot.eglImage = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, fourcc);
-    }
+    slot.eglImage = createPlaneImage(display, frame->dmaFd, byteWidth, frame->height, frame->stride, DRM_FORMAT_R8);
     if (slot.eglImage == EGL_NO_IMAGE_KHR) {
-        lastBindFailure_ = QStringLiteral("EGL RGB/BGR dma-buf import failed");
+        lastBindFailure_ = QStringLiteral("EGL RGB/BGR raw R8 dma-buf import failed");
         return false;
     }
 
@@ -431,6 +443,7 @@ bool RgbDmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, const
 
     slot.dmaFd = frame->dmaFd;
     slot.layout = frame->layout;
+    slot.byteWidth = byteWidth;
     return true;
 }
 
@@ -455,6 +468,8 @@ bool RgbDmaBufGl::bindFrame(const capture::DmaBufFrameHandle &frame)
     activeSlot_ = frame->bufferIndex;
     boundBgr_ = frame->layout == capture::DmaBufLayout::Bgr888;
     boundFlipVertical_ = frame->flipVertical;
+    boundPixelWidth_ = static_cast<float>(frame->width);
+    boundByteWidth_ = static_cast<float>(slots_[static_cast<size_t>(frame->bufferIndex)].byteWidth);
     boundFrame_ = frame;
     return true;
 }
@@ -491,6 +506,8 @@ void RgbDmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const f
 
     glUseProgram(programId_);
     glUniform1i(frameUniform_, 0);
+    glUniform1f(pixelWidthUniform_, boundPixelWidth_);
+    glUniform1f(byteWidthUniform_, boundByteWidth_);
     glUniform1i(bgrUniform_, boundBgr_ ? 1 : 0);
     glUniform1i(flipUniform_, boundFlipVertical_ ? 1 : 0);
 
