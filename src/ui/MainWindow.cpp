@@ -468,7 +468,13 @@ private:
         platform::linux::DmaBufReadGuard syncGuard(frame->dmaFd);
         if (!syncGuard.started()) return false;
 
-        const auto targetRect = computeTargetRect(frame, windowSize);
+        const QSize srcSize(frame->width, frame->height);
+        if (srcSize != lastSourceSize_ || windowSize != lastWindowSize_) {
+            cachedTargetRect_ = computeTargetRect(srcSize, windowSize);
+            lastSourceSize_ = srcSize;
+            lastWindowSize_ = windowSize;
+        }
+        const auto &targetRect = cachedTargetRect_;
         gl.glViewport(0, 0,
                       static_cast<GLsizei>(windowSize.width() * dpr),
                       static_cast<GLsizei>(windowSize.height() * dpr));
@@ -522,9 +528,8 @@ private:
         return true;
     }
 
-    QRect computeTargetRect(const capture::DmaBufFrameHandle &frame, const QSize windowSize) const
+    QRect computeTargetRect(const QSize srcSize, const QSize windowSize) const
     {
-        QSize srcSize(frame->width, frame->height);
         auto targetSize = srcSize;
         targetSize.scale(windowSize, Qt::KeepAspectRatio);
         return QRect(
@@ -550,6 +555,10 @@ private:
     std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
     std::optional<platform::linux::I420DmaBufGl> i420Gl_;
     capture::DmaBufFrameHandle boundDmaFrame_;
+
+    QSize lastSourceSize_;
+    QSize lastWindowSize_;
+    QRect cachedTargetRect_;
 };
 
 class GpuFrameRenderer final : public QWidget, public FrameRenderer {

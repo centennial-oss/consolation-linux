@@ -406,7 +406,11 @@ void V4L2CaptureSession::handleReadyRead()
         }
 
         if (buffer.index < buffers_.size()) {
-            buffers_[buffer.index].capturedAtNs = capture::monotonicClockNs();
+            const bool isMono = (buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
+            buffers_[buffer.index].capturedAtNs = isMono
+                ? static_cast<qint64>(buffer.timestamp.tv_sec) * 1'000'000'000LL
+                  + static_cast<qint64>(buffer.timestamp.tv_usec) * 1'000LL
+                : capture::monotonicClockNs();
         }
 
         if (havePending) {
