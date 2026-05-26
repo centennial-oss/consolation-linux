@@ -1,6 +1,7 @@
 #include "platform/linux/V4L2CaptureSession.h"
 
 #include <QByteArray>
+#include <libyuv/convert.h>
 #include <libyuv/convert_argb.h>
 
 #include <algorithm>
@@ -414,20 +415,7 @@ capture::FrameHandle V4L2CaptureSession::decodeFrame(const void *data, const int
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
-        auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
-        if (!frame) {
-            return {};
-        }
-        const QImage decoded =
-            QImage::fromData(static_cast<const uchar *>(data), bytesUsed).convertToFormat(QImage::Format_RGB32);
-        if (decoded.isNull() || decoded.size() != frame->size() || decoded.bytesPerLine() != frame->bytesPerLine()) {
-            return {};
-        }
-        std::memcpy(
-            writableFramePixels(frame)->bits(),
-            decoded.constBits(),
-            static_cast<size_t>(decoded.sizeInBytes()));
-        return frame;
+        return decodeMjpeg(static_cast<const uchar *>(data), bytesUsed);
     }
 
     if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
@@ -465,6 +453,53 @@ QImage *V4L2CaptureSession::writableFramePixels(const capture::FrameHandle &fram
         return nullptr;
     }
     return const_cast<QImage *>(frame.get());
+}
+
+capture::FrameHandle V4L2CaptureSession::decodeMjpeg(const uchar *data, const int bytesUsed)
+{
+#ifdef HAVE_JPEG
+    int jpegWidth = 0;
+    int jpegHeight = 0;
+    if (libyuv::MJPGSize(data, static_cast<size_t>(bytesUsed), &jpegWidth, &jpegHeight) == 0 && jpegWidth > 0 &&
+        jpegHeight > 0) {
+        auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+        auto *image = writableFramePixels(frame);
+        if (image != nullptr) {
+            const auto result = libyuv::MJPGToARGB(
+                data,
+                static_cast<size_t>(bytesUsed),
+                image->bits(),
+                image->bytesPerLine(),
+                jpegWidth,
+                jpegHeight,
+                width_,
+                height_);
+            if (result == 0) {
+                return frame;
+            }
+        }
+    }
+#endif
+    return decodeMjpegQtFallback(data, bytesUsed);
+}
+
+capture::FrameHandle V4L2CaptureSession::decodeMjpegQtFallback(const uchar *data, const int bytesUsed)
+{
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    if (!frame) {
+        return {};
+    }
+    const QImage decoded =
+        QImage::fromData(data, bytesUsed).convertToFormat(QImage::Format_RGB32);
+    if (decoded.isNull() || decoded.size() != frame->size() || decoded.bytesPerLine() != frame->bytesPerLine()) {
+        return {};
+    }
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
+        return {};
+    }
+    std::memcpy(image->bits(), decoded.constBits(), static_cast<size_t>(decoded.sizeInBytes()));
+    return frame;
 }
 
 capture::FrameHandle V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed)

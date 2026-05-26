@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets)
+find_package(JPEG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 
@@ -68,6 +69,15 @@ target_link_libraries(consolation_core
         PkgConfig::PIPEWIRE
         yuv
 )
+
+if(JPEG_FOUND)
+    target_compile_definitions(consolation_core PRIVATE HAVE_JPEG)
+    if(TARGET JPEG::JPEG)
+        target_link_libraries(consolation_core PRIVATE JPEG::JPEG)
+    else()
+        target_link_libraries(consolation_core PRIVATE ${JPEG_LIBRARIES})
+    endif()
+endif()
 
 add_executable(consolation
     resources/consolation.qrc
