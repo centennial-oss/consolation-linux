@@ -152,7 +152,7 @@ class FrameRenderer {
 public:
     virtual ~FrameRenderer() = default;
     virtual QWidget *widget() = 0;
-    virtual void setFrame(QImage frame) = 0;
+    virtual void setFrame(capture::FrameHandle frame) = 0;
     virtual int takePaintCount() = 0;
 };
 
@@ -169,7 +169,7 @@ public:
         return this;
     }
 
-    void setFrame(QImage frame) override
+    void setFrame(capture::FrameHandle frame) override
     {
         frame_ = std::move(frame);
         updateTargetRect();
@@ -201,12 +201,12 @@ protected:
 private:
     void updateTargetRect()
     {
-        if (frame_.isNull()) {
+        if (!frame_ || frame_->isNull()) {
             targetRect_ = {};
             return;
         }
 
-        auto targetSize = frame_.size();
+        auto targetSize = frame_->size();
         targetSize.scale(size(), Qt::KeepAspectRatio);
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
@@ -217,19 +217,19 @@ private:
     {
         ++paintCount_;
         painter.fillRect(rect(), Qt::black);
-        if (frame_.isNull()) {
+        if (!frame_ || frame_->isNull()) {
             return;
         }
 
         painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_.size()) {
-            painter.drawImage(targetRect_.topLeft(), frame_);
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
         } else {
-            painter.drawImage(targetRect_, frame_);
+            painter.drawImage(targetRect_, *frame_);
         }
     }
 
-    QImage frame_;
+    capture::FrameHandle frame_;
     QRect targetRect_;
     int paintCount_ = 0;
 };
@@ -247,7 +247,7 @@ public:
         return this;
     }
 
-    void setFrame(QImage frame) override
+    void setFrame(capture::FrameHandle frame) override
     {
         frame_ = std::move(frame);
         updateTargetRect();
@@ -277,12 +277,12 @@ protected:
 private:
     void updateTargetRect()
     {
-        if (frame_.isNull()) {
+        if (!frame_ || frame_->isNull()) {
             targetRect_ = {};
             return;
         }
 
-        auto targetSize = frame_.size();
+        auto targetSize = frame_->size();
         targetSize.scale(size(), Qt::KeepAspectRatio);
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
@@ -293,19 +293,19 @@ private:
     {
         ++paintCount_;
         painter.fillRect(rect(), Qt::black);
-        if (frame_.isNull()) {
+        if (!frame_ || frame_->isNull()) {
             return;
         }
 
         painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_.size()) {
-            painter.drawImage(targetRect_.topLeft(), frame_);
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
         } else {
-            painter.drawImage(targetRect_, frame_);
+            painter.drawImage(targetRect_, *frame_);
         }
     }
 
-    QImage frame_;
+    capture::FrameHandle frame_;
     QRect targetRect_;
     int paintCount_ = 0;
 };
@@ -354,7 +354,7 @@ public:
         rendererWidget_->lower();
     }
 
-    void setFrame(QImage frame)
+    void setFrame(capture::FrameHandle frame)
     {
         renderer_->setFrame(std::move(frame));
     }
@@ -410,8 +410,7 @@ private:
             return;
         }
 
-        setFrame(QImage(*pendingFrame_));
-        pendingFrame_.reset();
+        setFrame(std::move(pendingFrame_));
         ++uiFrameCount_;
     }
 
