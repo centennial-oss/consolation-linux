@@ -716,7 +716,8 @@ void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
 bool V4L2CaptureSession::pixelFormatSupportsDmaBufDisplay(const quint32 pixelFormat)
 {
     return pixelFormat == V4L2_PIX_FMT_NV12 || pixelFormat == V4L2_PIX_FMT_RGB24 ||
-        pixelFormat == V4L2_PIX_FMT_BGR24;
+        pixelFormat == V4L2_PIX_FMT_BGR24 || pixelFormat == V4L2_PIX_FMT_YUYV ||
+        pixelFormat == v4l2_fourcc('Y', 'U', 'Y', '2');
 }
 
 bool V4L2CaptureSession::useDmaBufDisplayPath() const
@@ -753,6 +754,9 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
         payload->layout = capture::DmaBufLayout::Bgr888;
         payload->stride = std::max(bytesPerLine_, width_ * 3);
         payload->flipVertical = true;
+    } else if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
+        payload->layout = capture::DmaBufLayout::Yuyv422;
+        payload->stride = std::max(bytesPerLine_, width_ * 2);
     } else {
         delete payload;
         return {};

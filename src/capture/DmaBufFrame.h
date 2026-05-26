@@ -11,6 +11,7 @@ enum class DmaBufLayout {
     Nv12,
     Rgb888,
     Bgr888,
+    Yuyv422,
 };
 
 // V4L2 capture buffer exported via VIDIOC_EXPBUF. The dma fd is owned by the capture session

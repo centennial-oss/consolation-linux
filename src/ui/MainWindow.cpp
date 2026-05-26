@@ -7,6 +7,7 @@
 #include "capture/DmaBufFrame.h"
 #include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
+#include "platform/linux/YuyvDmaBufGl.h"
 #include "platform/linux/PipeWireAudioSession.h"
 #include "platform/linux/V4L2CaptureSession.h"
 #include "ui/AppIcon.h"
@@ -269,7 +270,7 @@ public:
     {
         dmaFrame_.reset();
         boundDmaFrame_.reset();
-        if (!nv12Gl_.has_value() && !rgbGl_.has_value()) {
+        if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value()) {
             return;
         }
 
@@ -282,6 +283,10 @@ public:
             if (rgbGl_.has_value()) {
                 rgbGl_->releaseAllSlots();
                 rgbGl_->releaseFrame();
+            }
+            if (yuyvGl_.has_value()) {
+                yuyvGl_->releaseAllSlots();
+                yuyvGl_->releaseFrame();
             }
             doneCurrent();
         }
@@ -298,6 +303,10 @@ public:
             if (rgbGl_.has_value()) {
                 rgbGl_->shutdown();
                 rgbGl_.reset();
+            }
+            if (yuyvGl_.has_value()) {
+                yuyvGl_->shutdown();
+                yuyvGl_.reset();
             }
             doneCurrent();
         }
@@ -317,6 +326,9 @@ public:
         }
         if (rgbGl_.has_value()) {
             rgbGl_->releaseFrame();
+        }
+        if (yuyvGl_.has_value()) {
+            yuyvGl_->releaseFrame();
         }
         frame_ = std::move(frame);
         updateTargetRect();
@@ -363,6 +375,18 @@ protected:
                 std::cout << " (" << reason.toStdString() << ")";
             }
             std::cout << "; RGB24/BGR24 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+
+        yuyvGl_.emplace();
+        if (!yuyvGl_->initialize()) {
+            const auto reason = yuyvGl_->lastInitFailure();
+            yuyvGl_.reset();
+            std::cout << "[MainWindow capture] YUYV DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; YUYV/YUY2 will use libyuv CPU decode" << std::endl;
             std::cout.flush();
         }
     }
@@ -466,11 +490,27 @@ private:
             return true;
         }
 
+        if (dmaFrame_->layout == capture::DmaBufLayout::Yuyv422) {
+            if (!yuyvGl_ || !yuyvGl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!yuyvGl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            yuyvGl_->draw(size(), targetRect_, dpr);
+            return true;
+        }
+
         return false;
     }
 
     std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
     std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
+    std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
     capture::FrameHandle frame_;
     capture::DmaBufFrameHandle dmaFrame_;
     capture::DmaBufFrameHandle boundDmaFrame_;
@@ -485,7 +525,8 @@ bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
     const auto upper = pixelFormat.toUpper();
     return upper == QStringLiteral("NV12") || upper == QStringLiteral("RGB3") ||
         upper == QStringLiteral("RGB24") || upper == QStringLiteral("BGR3") ||
-        upper == QStringLiteral("BGR24");
+        upper == QStringLiteral("BGR24") || upper == QStringLiteral("YUYV") ||
+        upper == QStringLiteral("YUY2");
 }
 
 bool canCreateOpenGLContext()
