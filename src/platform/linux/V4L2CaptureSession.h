@@ -52,6 +52,7 @@ private:
     [[nodiscard]] capture::FrameHandle decodeMjpegQtFallback(const uchar *data, int bytesUsed);
     [[nodiscard]] QImage *writableFramePixels(const capture::FrameHandle &frame);
     void recordDecodedFrame(int bytesUsed, qint64 decodeNs, bool dmaBufPath);
+    [[nodiscard]] bool frameReadyForDmaDisplay(int bytesUsed, __u32 bufferFlags) const;
     void cleanupBuffers();
     void closeDevice();
 
@@ -74,6 +75,7 @@ private:
     int telemetryDmaFrameCount_ = 0;
     int telemetryCpuFrameCount_ = 0;
     bool dmaBufHandleFailureLogged_ = false;
+    bool dmaBufWarmupSkipLogged_ = false;
     QSocketNotifier *notifier_ = nullptr;
 };
 

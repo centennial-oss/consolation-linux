@@ -10,6 +10,7 @@
 #include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/YuyvDmaBufGl.h"
 #include "platform/linux/I420DmaBufGl.h"
+#include "platform/linux/DmaBufSync.h"
 
 #include "capture/FourCc.h"
 #include "platform/linux/PipeWireAudioSession.h"
@@ -540,6 +541,11 @@ private:
     bool tryPaintDmaFrame()
     {
         if (!dmaFrame_) {
+            return false;
+        }
+
+        platform::linux::DmaBufReadGuard dmaSync(dmaFrame_->dmaFd);
+        if (!dmaSync.started()) {
             return false;
         }
 

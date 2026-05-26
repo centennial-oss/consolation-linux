@@ -2,6 +2,7 @@
 
 #include "capture/FourCc.h"
 #include "capture/MonotonicClock.h"
+#include "platform/linux/DmaBufSync.h"
 
 #include <QByteArray>
 #include <QPointer>
@@ -84,6 +85,7 @@ bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const captu
     stop();
     dmaBufDisplayRequested_.store(requestedDmaBufDisplay);
     dmaBufHandleFailureLogged_ = false;
+    dmaBufWarmupSkipLogged_ = false;
 
     constexpr int maxAttempts = 3;
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
@@ -432,10 +434,19 @@ void V4L2CaptureSession::handleReadyRead()
 
     if (pending.index < buffers_.size()) {
         if (useDmaBufDisplayPath()) {
-            if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
-                recordDecodedFrame(static_cast<int>(pending.bytesused), 0, true);
-                emit dmaFrameReady(std::move(dmaFrame));
-                return;
+            const auto bytesUsed = static_cast<int>(pending.bytesused);
+            if (frameReadyForDmaDisplay(bytesUsed, pending.flags)) {
+                if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
+                    recordDecodedFrame(bytesUsed, 0, true);
+                    emit dmaFrameReady(std::move(dmaFrame));
+                    return;
+                }
+            } else if (!dmaBufWarmupSkipLogged_) {
+                dmaBufWarmupSkipLogged_ = true;
+                emit logMessage(QStringLiteral(
+                    "V4L2 skipping DMA-BUF display for warmup/error frame (bytesused=%1, flags=0x%2)")
+                                    .arg(bytesUsed)
+                                    .arg(static_cast<uint>(pending.flags), 0, 16));
             }
             if (!dmaBufHandleFailureLogged_) {
                 dmaBufHandleFailureLogged_ = true;
@@ -673,6 +684,35 @@ capture::FrameHandle V4L2CaptureSession::decodeRgb24(
     }
 
     return frame;
+}
+
+bool V4L2CaptureSession::frameReadyForDmaDisplay(const int bytesUsed, const __u32 bufferFlags) const
+{
+    if (bytesUsed <= 0 || width_ <= 0 || height_ <= 0) {
+        return false;
+    }
+
+    if ((bufferFlags & V4L2_BUF_FLAG_ERROR) != 0) {
+        return false;
+    }
+
+    const auto yStride = std::max(bytesPerLine_, width_);
+    if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
+        return bytesUsed >= yStride * height_ * 3 / 2;
+    }
+    if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
+        return bytesUsed >= std::max(bytesPerLine_, width_ * 2) * height_;
+    }
+    if (pixelFormat_ == V4L2_PIX_FMT_YUV420 || pixelFormat_ == V4L2_PIX_FMT_YVU420) {
+        const auto chromaStride = (yStride + 1) / 2;
+        const auto chromaHeight = (height_ + 1) / 2;
+        return bytesUsed >= yStride * height_ + chromaStride * chromaHeight * 2;
+    }
+    if (pixelFormat_ == V4L2_PIX_FMT_RGB24 || pixelFormat_ == V4L2_PIX_FMT_BGR24) {
+        return bytesUsed >= std::max(bytesPerLine_, width_ * 3) * height_;
+    }
+
+    return false;
 }
 
 void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs, const bool dmaBufPath)
