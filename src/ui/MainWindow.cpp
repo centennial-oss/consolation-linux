@@ -218,7 +218,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
-        update();
+        repaint();
     }
 
     int takePaintCount() override
@@ -396,7 +396,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
-        update();
+        repaint();
     }
 
     void setDmaFrame(capture::DmaBufFrameHandle frame) override
@@ -406,7 +406,7 @@ public:
         displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
         dmaFrame_ = std::move(frame);
         updateTargetRect();
-        update();
+        repaint();
     }
 
     int takePaintCount() override
@@ -2202,9 +2202,9 @@ void MainWindow::updateStatsOverlay()
     if (statsOverlay_->text() != cachedStatsOverlayText_) {
         statsOverlay_->setText(cachedStatsOverlayText_);
         statsOverlay_->adjustSize();
-    }
-    if (videoSurface_) {
-        videoSurface_->setOverlay(statsOverlay_);
+        if (videoSurface_) {
+            videoSurface_->setOverlay(statsOverlay_);
+        }
     }
     statsOverlay_->show();
 }
