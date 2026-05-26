@@ -750,9 +750,13 @@ public:
         schedulePresent();
     }
 
-    void setPresentCadenceMs(const int intervalMs)
+    void setPresentCadenceFps(const double fps)
     {
-        targetPresentIntervalMs_ = std::max(1, intervalMs);
+        if (fps <= 0.0) {
+            targetPresentIntervalNs_ = 16'666'667LL;
+            return;
+        }
+        targetPresentIntervalNs_ = static_cast<qint64>(std::llround(1e9 / fps));
     }
 
     void setDmaGlFailedHandler(GpuFrameRenderer::DmaGlFailedHandler handler)
@@ -835,8 +839,8 @@ private:
     void schedulePresent()
     {
         if (pendingDmaFrame_) {
-            const auto elapsed = presentPacer_.isValid() ? presentPacer_.elapsed() : targetPresentIntervalMs_;
-            if (!presentPacer_.isValid() || elapsed >= targetPresentIntervalMs_) {
+            const auto elapsedNs = presentPacer_.isValid() ? presentPacer_.nsecsElapsed() : targetPresentIntervalNs_;
+            if (!presentPacer_.isValid() || elapsedNs >= targetPresentIntervalNs_) {
                 presentTimer_.stop();
                 presentPacer_.restart();
                 renderer_->setDmaFrame(std::move(pendingDmaFrame_));
@@ -846,8 +850,8 @@ private:
             }
 
             if (!presentTimer_.isActive()) {
-                const auto remaining = targetPresentIntervalMs_ - static_cast<int>(elapsed);
-                presentTimer_.start(std::max(1, remaining));
+                const auto remainingMs = static_cast<int>((targetPresentIntervalNs_ - elapsedNs) / 1'000'000LL);
+                presentTimer_.start(std::max(1, remainingMs));
             }
             return;
         }
@@ -858,8 +862,8 @@ private:
             return;
         }
 
-        const auto elapsed = presentPacer_.isValid() ? presentPacer_.elapsed() : targetPresentIntervalMs_;
-        if (!presentPacer_.isValid() || elapsed >= targetPresentIntervalMs_) {
+        const auto elapsedNs = presentPacer_.isValid() ? presentPacer_.nsecsElapsed() : targetPresentIntervalNs_;
+        if (!presentPacer_.isValid() || elapsedNs >= targetPresentIntervalNs_) {
             presentTimer_.stop();
             presentPacer_.restart();
             setFrame(std::move(pendingFrame_));
@@ -869,8 +873,8 @@ private:
         }
 
         if (!presentTimer_.isActive()) {
-            const auto remaining = targetPresentIntervalMs_ - static_cast<int>(elapsed);
-            presentTimer_.start(std::max(1, remaining));
+            const auto remainingMs = static_cast<int>((targetPresentIntervalNs_ - elapsedNs) / 1'000'000LL);
+            presentTimer_.start(std::max(1, remainingMs));
         }
     }
 
@@ -919,18 +923,11 @@ private:
     int uiFrameCount_ = 0;
     int presentDmaCount_ = 0;
     int presentCpuCount_ = 0;
-    int targetPresentIntervalMs_ = 16;
+    qint64 targetPresentIntervalNs_ = 16'000'000LL;
     QElapsedTimer presentPacer_;
     QTimer presentTimer_;
 };
 
-int presentIntervalMsFromFps(const double fps)
-{
-    if (fps <= 0.0) {
-        return 16;
-    }
-    return std::max(1, static_cast<int>(std::lround(1000.0 / fps)));
-}
 
 QString resolveFrameMemoryLabel(const capture::VideoTelemetrySnapshot &telemetry)
 {
@@ -1866,7 +1863,7 @@ void MainWindow::startPlayback()
         latestTelemetry_ = snapshot;
         refreshStatsOverlayCache();
         if (videoSurface_ != nullptr && snapshot.configuredFps > 0.0) {
-            videoSurface_->setPresentCadenceMs(presentIntervalMsFromFps(snapshot.configuredFps));
+            videoSurface_->setPresentCadenceFps(snapshot.configuredFps);
         }
     });
 
@@ -1994,7 +1991,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     layout->setSpacing(0);
 
     auto *video = new VideoSurface(root);
-    video->setPresentCadenceMs(presentIntervalMsFromFps(selectedFormat_.framesPerSecond));
+    video->setPresentCadenceFps(selectedFormat_.framesPerSecond);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
