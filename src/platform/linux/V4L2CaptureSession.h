@@ -50,7 +50,7 @@ private:
     [[nodiscard]] capture::FrameHandle decodeMjpeg(const uchar *data, int bytesUsed);
     [[nodiscard]] capture::FrameHandle decodeMjpegQtFallback(const uchar *data, int bytesUsed);
     [[nodiscard]] QImage *writableFramePixels(const capture::FrameHandle &frame);
-    void recordDecodedFrame(int bytesUsed, qint64 decodeNs);
+    void recordDecodedFrame(int bytesUsed, qint64 decodeNs, bool dmaBufPath);
     void cleanupBuffers();
     void closeDevice();
 
@@ -69,8 +69,9 @@ private:
     qint64 telemetryWindowStartNs_ = 0;
     int telemetryFrameCount_ = 0;
     qint64 telemetryDecodeTotalNs_ = 0;
-    qint64 telemetryDecodeMaxNs_ = 0;
     qint64 telemetryPayloadTotalBytes_ = 0;
+    int telemetryDmaFrameCount_ = 0;
+    int telemetryCpuFrameCount_ = 0;
     QSocketNotifier *notifier_ = nullptr;
 };
 

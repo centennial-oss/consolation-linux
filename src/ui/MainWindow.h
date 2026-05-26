@@ -42,7 +42,8 @@ private:
     void updateVideoFrame(capture::FrameHandle frame);
     void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
     void updateStatsOverlay();
-    QString buildStatsOverlayText() const;
+    void refreshStatsOverlayCache();
+    [[nodiscard]] QString formatStatsOverlayText() const;
     void stopPlayback();
     void stopPlaybackAsync();
     void finishPlaybackStopped();
@@ -69,8 +70,10 @@ private:
     QTimer *statsOverlayTimer_ = nullptr;
     QTimer *startupRefreshTimer_ = nullptr;
     capture::VideoTelemetrySnapshot latestTelemetry_;
+    QString cachedStatsOverlayText_;
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
+    capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
     bool playbackStopping_ = false;
     std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;

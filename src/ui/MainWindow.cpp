@@ -8,6 +8,8 @@
 #include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/YuyvDmaBufGl.h"
+
+#include "capture/FourCc.h"
 #include "platform/linux/PipeWireAudioSession.h"
 #include "platform/linux/V4L2CaptureSession.h"
 #include "ui/AppIcon.h"
@@ -165,6 +167,12 @@ public:
         Q_UNUSED(frame);
     }
     virtual int takePaintCount() = 0;
+
+    virtual void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints)
+    {
+        gpuPaints = 0;
+        cpuPaints = 0;
+    }
 };
 
 class CpuFrameRenderer final : public QWidget, public FrameRenderer {
@@ -194,11 +202,19 @@ public:
         return count;
     }
 
+    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints) override
+    {
+        gpuPaints = 0;
+        cpuPaints = cpuPaintCount_;
+        cpuPaintCount_ = 0;
+    }
+
 protected:
     void paintEvent(QPaintEvent *event) override
     {
         Q_UNUSED(event);
 
+        ++cpuPaintCount_;
         QPainter painter(this);
         paintFrame(painter);
     }
@@ -243,6 +259,7 @@ private:
     capture::FrameHandle frame_;
     QRect targetRect_;
     int paintCount_ = 0;
+    int cpuPaintCount_ = 0;
 };
 
 class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
@@ -351,6 +368,14 @@ public:
         return count;
     }
 
+    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints) override
+    {
+        gpuPaints = gpuPaintCount_;
+        cpuPaints = cpuPaintCount_;
+        gpuPaintCount_ = 0;
+        cpuPaintCount_ = 0;
+    }
+
 protected:
     void initializeGL() override
     {
@@ -396,6 +421,7 @@ protected:
         ++paintCount_;
         if (dmaFrame_) {
             if (tryPaintDmaFrame()) {
+                ++gpuPaintCount_;
                 return;
             }
             auto failedFrame = std::move(dmaFrame_);
@@ -407,6 +433,7 @@ protected:
             return;
         }
 
+        ++cpuPaintCount_;
         QPainter painter(this);
         paintFrame(painter);
     }
@@ -518,6 +545,8 @@ private:
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     QRect targetRect_;
     int paintCount_ = 0;
+    int gpuPaintCount_ = 0;
+    int cpuPaintCount_ = 0;
 };
 
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
@@ -645,6 +674,11 @@ public:
     int takePaintCount()
     {
         return renderer_->takePaintCount();
+    }
+
+    void takeDisplayPathCounts(int &gpuPaints, int &cpuPaints)
+    {
+        renderer_->takeDisplayPathCounts(gpuPaints, cpuPaints);
     }
 
     void releasePlaybackFrames()
@@ -1285,6 +1319,8 @@ void MainWindow::buildStoppedState()
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
+    cachedStatsOverlayText_.clear();
+    displayPath_ = capture::VideoDisplayPath::Unknown;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
     if (statsOverlayTimer_ != nullptr) {
@@ -1663,6 +1699,7 @@ void MainWindow::startPlayback()
     });
     connect(captureSession_.get(), &capture::CaptureSession::telemetryReady, this, [this](const capture::VideoTelemetrySnapshot &snapshot) {
         latestTelemetry_ = snapshot;
+        refreshStatsOverlayCache();
         if (videoSurface_ != nullptr && snapshot.configuredFps > 0.0) {
             videoSurface_->setPresentCadenceMs(presentIntervalMsFromFps(snapshot.configuredFps));
         }
@@ -1715,6 +1752,8 @@ void MainWindow::showConnectingState()
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
+    cachedStatsOverlayText_.clear();
+    displayPath_ = capture::VideoDisplayPath::Unknown;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
     if (statsOverlayTimer_ != nullptr) {
@@ -1747,6 +1786,8 @@ void MainWindow::showStoppingState()
     statsOverlay_.clear();
     videoSurface_.clear();
     latestTelemetry_ = {};
+    cachedStatsOverlayText_.clear();
+    displayPath_ = capture::VideoDisplayPath::Unknown;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
     if (statsOverlayTimer_ != nullptr) {
@@ -1914,30 +1955,65 @@ void MainWindow::updateStatsOverlay()
     uiFps_ = videoSurface_ ? videoSurface_->takeUiFrameCount() * 2.0 : 0.0;
     paintFps_ = videoSurface_ ? videoSurface_->takePaintCount() * 2.0 : 0.0;
 
+    int gpuPaints = 0;
+    int cpuPaints = 0;
+    if (videoSurface_ != nullptr) {
+        videoSurface_->takeDisplayPathCounts(gpuPaints, cpuPaints);
+    }
+    if (gpuPaints > 0 && cpuPaints == 0) {
+        displayPath_ = capture::VideoDisplayPath::Gpu;
+    } else if (cpuPaints > 0 && gpuPaints == 0) {
+        displayPath_ = capture::VideoDisplayPath::Cpu;
+    } else if (gpuPaints > 0 && cpuPaints > 0) {
+        displayPath_ = capture::VideoDisplayPath::Mixed;
+    }
+
+    refreshStatsOverlayCache();
+
     if (!showVideoStatsOverlay) {
         statsOverlay_->hide();
         return;
     }
 
-    statsOverlay_->setText(buildStatsOverlayText());
-    statsOverlay_->adjustSize();
+    if (statsOverlay_->text() != cachedStatsOverlayText_) {
+        statsOverlay_->setText(cachedStatsOverlayText_);
+        statsOverlay_->adjustSize();
+    }
     if (videoSurface_) {
         videoSurface_->setOverlay(statsOverlay_);
     }
     statsOverlay_->show();
 }
 
-QString MainWindow::buildStatsOverlayText() const
+void MainWindow::refreshStatsOverlayCache()
+{
+    const auto nextText = formatStatsOverlayText();
+    if (nextText == cachedStatsOverlayText_) {
+        return;
+    }
+    cachedStatsOverlayText_ = nextText;
+}
+
+QString MainWindow::formatStatsOverlayText() const
 {
     const auto width = latestTelemetry_.width > 0 ? latestTelemetry_.width : selectedFormat_.width;
     const auto height = latestTelemetry_.height > 0 ? latestTelemetry_.height : selectedFormat_.height;
     const auto configuredFps = latestTelemetry_.configuredFps > 0.0 ? latestTelemetry_.configuredFps : selectedFormat_.framesPerSecond;
-    const auto pixelFormat = latestTelemetry_.pixelFormat.isEmpty() ? selectedFormat_.pixelFormat : latestTelemetry_.pixelFormat;
+
+    auto pixelFourcc = latestTelemetry_.pixelFormatFourcc;
+    if (pixelFourcc == 0) {
+        pixelFourcc = stringToFourCc(selectedFormat_.pixelFormat);
+    }
+
+    const auto pixelFormat =
+        pixelFourcc != 0 ? capture::fourCcToString(pixelFourcc) : selectedFormat_.pixelFormat;
 
     QStringList fields {
         QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
         pixelFormat,
         QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
+        QStringLiteral("Mem:%1").arg(capture::frameMemoryLabel(latestTelemetry_.frameMemory)),
+        QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
 
     if (!showAdvancedVideoStats) {
@@ -1948,7 +2024,6 @@ QString MainWindow::buildStatsOverlayText() const
         QStringLiteral("UI:%1").arg(QString::number(uiFps_, 'f', 0)),
         QStringLiteral("Paint:%1").arg(QString::number(paintFps_, 'f', 0)),
         QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1)),
-        QStringLiteral("CnvMx:%1").arg(QString::number(latestTelemetry_.decodeMaxMs, 'f', 1)),
         QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
         QStringLiteral("Buf:%1").arg(latestTelemetry_.bufferCount),
         QStringLiteral("Payload:%1KiB").arg(QString::number(latestTelemetry_.payloadAvgKb, 'f', 0)),

@@ -1,5 +1,7 @@
 #include "platform/linux/V4L2CaptureSession.h"
 
+#include "capture/FourCc.h"
+
 #include <QByteArray>
 #include <libyuv/convert.h>
 #include <libyuv/convert_argb.h>
@@ -45,17 +47,6 @@ quint32 stringToFourCc(const QString &value)
         return 0;
     }
     return v4l2_fourcc(latin[0], latin[1], latin[2], latin[3]);
-}
-
-QString fourCcToString(const quint32 fourcc)
-{
-    char chars[4] = {
-        static_cast<char>(fourcc & 0xff),
-        static_cast<char>((fourcc >> 8) & 0xff),
-        static_cast<char>((fourcc >> 16) & 0xff),
-        static_cast<char>((fourcc >> 24) & 0xff),
-    };
-    return QString::fromLatin1(chars, 4).trimmed();
 }
 
 v4l2_fract fpsToTimePerFrame(const double fps)
@@ -228,7 +219,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
             emit failed(QStringLiteral("Capture device would negotiate %1x%2 %3 instead of requested %4; not applying format change.")
                             .arg(static_cast<int>(trial.fmt.pix.width))
                             .arg(static_cast<int>(trial.fmt.pix.height))
-                            .arg(fourCcToString(trial.fmt.pix.pixelformat), format.label));
+                            .arg(capture::fourCcToString(trial.fmt.pix.pixelformat), format.label));
             return false;
         }
 
@@ -283,7 +274,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
     emit logMessage(QStringLiteral("V4L2 current format %1x%2 %3 stride=%4")
                         .arg(width_)
                         .arg(height_)
-                        .arg(fourCcToString(pixelFormat_))
+                        .arg(capture::fourCcToString(pixelFormat_))
                         .arg(bytesPerLine_));
 
     if (width_ <= 0 || height_ <= 0) {
@@ -305,7 +296,7 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
     }
     if (pixelFormat_ != requestedPixelFormat) {
         emit logMessage(QStringLiteral("V4L2 note: device negotiated pixel format %1 (requested %2)")
-                            .arg(fourCcToString(pixelFormat_), format.pixelFormat));
+                            .arg(capture::fourCcToString(pixelFormat_), format.pixelFormat));
     }
 
     framePool_ = std::make_shared<capture::FrameBufferPool>();
@@ -359,7 +350,7 @@ bool V4L2CaptureSession::allocateBuffers()
         dmaBufDisplayEnabled_ = true;
         emit logMessage(
             QStringLiteral("V4L2 %1 DMA-BUF export enabled for zero-copy display")
-                .arg(fourCcToString(pixelFormat_)));
+                .arg(capture::fourCcToString(pixelFormat_)));
     }
 
     return true;
@@ -432,7 +423,7 @@ void V4L2CaptureSession::handleReadyRead()
     if (pending.index < buffers_.size()) {
         if (useDmaBufDisplayPath()) {
             if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
-                recordDecodedFrame(static_cast<int>(pending.bytesused), 0);
+                recordDecodedFrame(static_cast<int>(pending.bytesused), 0, true);
                 emit dmaFrameReady(std::move(dmaFrame));
                 return;
             }
@@ -442,7 +433,7 @@ void V4L2CaptureSession::handleReadyRead()
         auto frame = decodeFrame(buffers_[pending.index].start, static_cast<int>(pending.bytesused));
         const auto decodeNs = monotonicNs() - decodeStartNs;
         if (frame && !frame->isNull()) {
-            recordDecodedFrame(static_cast<int>(pending.bytesused), decodeNs);
+            recordDecodedFrame(static_cast<int>(pending.bytesused), decodeNs, false);
             emit frameReady(std::move(frame));
         }
     }
@@ -668,7 +659,7 @@ capture::FrameHandle V4L2CaptureSession::decodeRgb24(
     return frame;
 }
 
-void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs)
+void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 decodeNs, const bool dmaBufPath)
 {
     const auto nowNs = monotonicNs();
     if (telemetryWindowStartNs_ == 0) {
@@ -677,8 +668,12 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
 
     ++telemetryFrameCount_;
     telemetryDecodeTotalNs_ += decodeNs;
-    telemetryDecodeMaxNs_ = std::max(telemetryDecodeMaxNs_, decodeNs);
     telemetryPayloadTotalBytes_ += bytesUsed;
+    if (dmaBufPath) {
+        ++telemetryDmaFrameCount_;
+    } else {
+        ++telemetryCpuFrameCount_;
+    }
 
     const auto elapsedNs = nowNs - telemetryWindowStartNs_;
     if (elapsedNs < telemetryWindowNs) {
@@ -689,23 +684,30 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
     snapshot.width = width_;
     snapshot.height = height_;
     snapshot.configuredFps = configuredFps_;
-    snapshot.pixelFormat = fourCcToString(pixelFormat_);
+    snapshot.pixelFormatFourcc = pixelFormat_;
     snapshot.decodedFps = telemetryFrameCount_ * 1'000'000'000.0 / static_cast<double>(elapsedNs);
     snapshot.decodeAvgMs = telemetryFrameCount_ > 0
         ? static_cast<double>(telemetryDecodeTotalNs_) / static_cast<double>(telemetryFrameCount_) / 1'000'000.0
         : 0.0;
-    snapshot.decodeMaxMs = static_cast<double>(telemetryDecodeMaxNs_) / 1'000'000.0;
     snapshot.payloadAvgKb = telemetryFrameCount_ > 0
         ? static_cast<double>(telemetryPayloadTotalBytes_) / static_cast<double>(telemetryFrameCount_) / 1024.0
         : 0.0;
     snapshot.bufferCount = static_cast<int>(buffers_.size());
+    if (telemetryDmaFrameCount_ > 0 && telemetryCpuFrameCount_ == 0) {
+        snapshot.frameMemory = capture::VideoFrameMemory::DmaBuf;
+    } else if (telemetryCpuFrameCount_ > 0 && telemetryDmaFrameCount_ == 0) {
+        snapshot.frameMemory = capture::VideoFrameMemory::Mmap;
+    } else if (telemetryDmaFrameCount_ > 0 && telemetryCpuFrameCount_ > 0) {
+        snapshot.frameMemory = capture::VideoFrameMemory::Mixed;
+    }
     emit telemetryReady(snapshot);
 
     telemetryWindowStartNs_ = nowNs;
     telemetryFrameCount_ = 0;
     telemetryDecodeTotalNs_ = 0;
-    telemetryDecodeMaxNs_ = 0;
     telemetryPayloadTotalBytes_ = 0;
+    telemetryDmaFrameCount_ = 0;
+    telemetryCpuFrameCount_ = 0;
 }
 
 void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
@@ -785,7 +787,7 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
 
     if (dmaBufDisplayRequested_.load()) {
         emit logMessage(
-            QStringLiteral("%1 DMA-BUF display falling back to CPU decode").arg(fourCcToString(pixelFormat_)));
+            QStringLiteral("%1 DMA-BUF display falling back to CPU decode").arg(capture::fourCcToString(pixelFormat_)));
     }
     dmaBufDisplayRequested_.store(false);
 
@@ -803,7 +805,7 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
     frame.reset();
 
     if (cpuFrame && !cpuFrame->isNull()) {
-        recordDecodedFrame(bytesUsed, decodeNs);
+        recordDecodedFrame(bytesUsed, decodeNs, false);
         emit frameReady(std::move(cpuFrame));
     }
 }

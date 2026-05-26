@@ -37,17 +37,59 @@ struct CaptureDevice {
     std::vector<CaptureFormat> formats;
 };
 
+enum class VideoFrameMemory {
+    Unknown = 0,
+    Mmap,
+    DmaBuf,
+    Mixed,
+};
+
+enum class VideoDisplayPath {
+    Unknown = 0,
+    Gpu,
+    Cpu,
+    Mixed,
+};
+
 struct VideoTelemetrySnapshot {
     int width = 0;
     int height = 0;
     double configuredFps = 0.0;
-    QString pixelFormat;
+    quint32 pixelFormatFourcc = 0;
     double decodedFps = 0.0;
     double decodeAvgMs = 0.0;
-    double decodeMaxMs = 0.0;
     double payloadAvgKb = 0.0;
     int bufferCount = 0;
+    VideoFrameMemory frameMemory = VideoFrameMemory::Unknown;
 };
+
+inline QString frameMemoryLabel(const VideoFrameMemory memory)
+{
+    switch (memory) {
+    case VideoFrameMemory::Mmap:
+        return QStringLiteral("MMAP");
+    case VideoFrameMemory::DmaBuf:
+        return QStringLiteral("DMA-BUF");
+    case VideoFrameMemory::Mixed:
+        return QStringLiteral("MIXED");
+    default:
+        return QStringLiteral("—");
+    }
+}
+
+inline QString displayPathLabel(const VideoDisplayPath path)
+{
+    switch (path) {
+    case VideoDisplayPath::Gpu:
+        return QStringLiteral("GPU");
+    case VideoDisplayPath::Cpu:
+        return QStringLiteral("CPU");
+    case VideoDisplayPath::Mixed:
+        return QStringLiteral("MIXED");
+    default:
+        return QStringLiteral("—");
+    }
+}
 
 } // namespace consolation::capture
 
