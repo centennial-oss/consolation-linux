@@ -41,8 +41,11 @@ add_library(consolation_core STATIC
     src/capture/CaptureBackendManager.h
     src/capture/CaptureSession.h
     src/capture/CaptureTypes.h
+    src/capture/DmaBufFrame.h
     src/capture/FrameBufferPool.cpp
     src/capture/FrameBufferPool.h
+    src/platform/linux/Nv12DmaBufGl.cpp
+    src/platform/linux/Nv12DmaBufGl.h
     src/platform/linux/V4L2CaptureSession.cpp
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp
@@ -77,6 +80,11 @@ if(JPEG_FOUND)
     else()
         target_link_libraries(consolation_core PRIVATE ${JPEG_LIBRARIES})
     endif()
+endif()
+
+if(UNIX AND NOT APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(consolation_core PRIVATE OpenGL::EGL OpenGL::GL)
 endif()
 
 add_executable(consolation

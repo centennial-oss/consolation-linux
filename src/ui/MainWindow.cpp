@@ -4,7 +4,10 @@
 #include "app/BuildInfo.h"
 #include "capture/CaptureBackendManager.h"
 #include "capture/CaptureSession.h"
+#include "capture/DmaBufFrame.h"
+#include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/PipeWireAudioSession.h"
+#include "platform/linux/V4L2CaptureSession.h"
 #include "ui/AppIcon.h"
 
 #include <QApplication>
@@ -61,6 +64,7 @@
 #include <iostream>
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+#include <optional>
 #include <utility>
 #include <unistd.h>
 #include <array>
@@ -154,6 +158,10 @@ public:
     virtual ~FrameRenderer() = default;
     virtual QWidget *widget() = 0;
     virtual void setFrame(capture::FrameHandle frame) = 0;
+    virtual void setDmaFrame(capture::DmaBufFrameHandle frame)
+    {
+        Q_UNUSED(frame);
+    }
     virtual int takePaintCount() = 0;
 };
 
@@ -237,10 +245,51 @@ private:
 
 class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
 public:
+    using DmaGlFailedHandler = std::function<void()>;
+    using DmaCpuFallbackHandler = std::function<void(capture::DmaBufFrameHandle)>;
+
     explicit GpuFrameRenderer(QWidget *parent = nullptr)
         : QOpenGLWidget(parent)
     {
         setAutoFillBackground(false);
+    }
+
+    void setDmaGlFailedHandler(DmaGlFailedHandler handler)
+    {
+        dmaGlFailedHandler_ = std::move(handler);
+    }
+
+    void setDmaCpuFallbackHandler(DmaCpuFallbackHandler handler)
+    {
+        dmaCpuFallbackHandler_ = std::move(handler);
+    }
+
+    void releaseDmaGlState()
+    {
+        dmaFrame_.reset();
+        boundDmaFrame_.reset();
+        if (!nv12Gl_.has_value()) {
+            return;
+        }
+
+        if (context() != nullptr && context()->isValid()) {
+            makeCurrent();
+            nv12Gl_->releaseAllSlots();
+            nv12Gl_->releaseFrame();
+            doneCurrent();
+        }
+    }
+
+    ~GpuFrameRenderer() override
+    {
+        if (context() != nullptr && context()->isValid()) {
+            makeCurrent();
+            if (nv12Gl_.has_value()) {
+                nv12Gl_->shutdown();
+                nv12Gl_.reset();
+            }
+            doneCurrent();
+        }
     }
 
     QWidget *widget() override
@@ -250,7 +299,21 @@ public:
 
     void setFrame(capture::FrameHandle frame) override
     {
+        dmaFrame_.reset();
+        boundDmaFrame_.reset();
+        if (nv12Gl_.has_value()) {
+            nv12Gl_->releaseFrame();
+        }
         frame_ = std::move(frame);
+        updateTargetRect();
+        update();
+    }
+
+    void setDmaFrame(capture::DmaBufFrameHandle frame) override
+    {
+        frame_.reset();
+        boundDmaFrame_.reset();
+        dmaFrame_ = std::move(frame);
         updateTargetRect();
         update();
     }
@@ -263,8 +326,54 @@ public:
     }
 
 protected:
+    void initializeGL() override
+    {
+        nv12Gl_.emplace();
+        if (!nv12Gl_->initialize()) {
+            const auto reason = nv12Gl_->lastInitFailure();
+            nv12Gl_.reset();
+            std::cout << "[MainWindow capture] NV12 DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; NV12 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+    }
+
     void paintGL() override
     {
+        ++paintCount_;
+        if (dmaFrame_ && (!nv12Gl_ || !nv12Gl_->isAvailable())) {
+            auto failedFrame = std::move(dmaFrame_);
+            if (dmaCpuFallbackHandler_) {
+                dmaCpuFallbackHandler_(std::move(failedFrame));
+            } else {
+                failedFrame.reset();
+            }
+            return;
+        }
+
+        if (dmaFrame_ && nv12Gl_ && nv12Gl_->isAvailable()) {
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!nv12Gl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    auto failedFrame = std::move(dmaFrame_);
+                    if (dmaCpuFallbackHandler_) {
+                        dmaCpuFallbackHandler_(std::move(failedFrame));
+                    } else {
+                        failedFrame.reset();
+                    }
+                } else {
+                    boundDmaFrame_ = dmaFrame_;
+                }
+            }
+            if (boundDmaFrame_) {
+                nv12Gl_->draw(size(), targetRect_, static_cast<float>(devicePixelRatioF()));
+                return;
+            }
+        }
+
         QPainter painter(this);
         paintFrame(painter);
     }
@@ -278,12 +387,17 @@ protected:
 private:
     void updateTargetRect()
     {
-        if (!frame_ || frame_->isNull()) {
+        QSize sourceSize;
+        if (dmaFrame_) {
+            sourceSize = QSize(dmaFrame_->width, dmaFrame_->height);
+        } else if (frame_ && !frame_->isNull()) {
+            sourceSize = frame_->size();
+        } else {
             targetRect_ = {};
             return;
         }
 
-        auto targetSize = frame_->size();
+        auto targetSize = sourceSize;
         targetSize.scale(size(), Qt::KeepAspectRatio);
         targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
@@ -292,7 +406,6 @@ private:
 
     void paintFrame(QPainter &painter)
     {
-        ++paintCount_;
         painter.fillRect(rect(), Qt::black);
         if (!frame_ || frame_->isNull()) {
             return;
@@ -306,7 +419,12 @@ private:
         }
     }
 
+    std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
     capture::FrameHandle frame_;
+    capture::DmaBufFrameHandle dmaFrame_;
+    capture::DmaBufFrameHandle boundDmaFrame_;
+    DmaGlFailedHandler dmaGlFailedHandler_;
+    DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     QRect targetRect_;
     int paintCount_ = 0;
 };
@@ -344,6 +462,12 @@ public:
             auto *renderer = new GpuFrameRenderer(this);
             renderer_ = renderer;
             rendererWidget_ = renderer;
+            if (dmaGlFailedHandler_) {
+                renderer->setDmaGlFailedHandler(dmaGlFailedHandler_);
+            }
+            if (dmaCpuFallbackHandler_) {
+                renderer->setDmaCpuFallbackHandler(dmaCpuFallbackHandler_);
+            }
             std::cout << "[MainWindow capture] video renderer: OpenGL" << std::endl;
         } else {
             auto *renderer = new CpuFrameRenderer(this);
@@ -366,13 +490,37 @@ public:
 
     void setPendingFrame(capture::FrameHandle frame)
     {
+        pendingDmaFrame_.reset();
         pendingFrame_ = std::move(frame);
+        schedulePresent();
+    }
+
+    void setPendingDmaFrame(capture::DmaBufFrameHandle frame)
+    {
+        pendingFrame_.reset();
+        pendingDmaFrame_ = std::move(frame);
         schedulePresent();
     }
 
     void setPresentCadenceMs(const int intervalMs)
     {
         targetPresentIntervalMs_ = std::max(1, intervalMs);
+    }
+
+    void setDmaGlFailedHandler(GpuFrameRenderer::DmaGlFailedHandler handler)
+    {
+        dmaGlFailedHandler_ = std::move(handler);
+        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
+            gpu->setDmaGlFailedHandler(dmaGlFailedHandler_);
+        }
+    }
+
+    void setDmaCpuFallbackHandler(GpuFrameRenderer::DmaCpuFallbackHandler handler)
+    {
+        dmaCpuFallbackHandler_ = std::move(handler);
+        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
+            gpu->setDmaCpuFallbackHandler(dmaCpuFallbackHandler_);
+        }
     }
 
     int takeUiFrameCount()
@@ -399,6 +547,18 @@ public:
         return renderer_->takePaintCount();
     }
 
+    void releasePlaybackFrames()
+    {
+        presentTimer_.stop();
+        pendingDmaFrame_.reset();
+        pendingFrame_.reset();
+        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
+            gpu->releaseDmaGlState();
+        } else {
+            renderer_->setFrame({});
+        }
+    }
+
 protected:
     void resizeEvent(QResizeEvent *event) override
     {
@@ -411,6 +571,23 @@ protected:
 private:
     void schedulePresent()
     {
+        if (pendingDmaFrame_) {
+            const auto elapsed = presentPacer_.isValid() ? presentPacer_.elapsed() : targetPresentIntervalMs_;
+            if (!presentPacer_.isValid() || elapsed >= targetPresentIntervalMs_) {
+                presentTimer_.stop();
+                presentPacer_.restart();
+                renderer_->setDmaFrame(std::move(pendingDmaFrame_));
+                ++uiFrameCount_;
+                return;
+            }
+
+            if (!presentTimer_.isActive()) {
+                const auto remaining = targetPresentIntervalMs_ - static_cast<int>(elapsed);
+                presentTimer_.start(std::max(1, remaining));
+            }
+            return;
+        }
+
         if (!pendingFrame_ || pendingFrame_->isNull()) {
             pendingFrame_.reset();
             presentTimer_.stop();
@@ -462,7 +639,10 @@ private:
 
     FrameRenderer *renderer_ = nullptr;
     QWidget *rendererWidget_ = nullptr;
+    GpuFrameRenderer::DmaGlFailedHandler dmaGlFailedHandler_;
+    GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     capture::FrameHandle pendingFrame_;
+    capture::DmaBufFrameHandle pendingDmaFrame_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
     int uiFrameCount_ = 0;
@@ -1362,6 +1542,15 @@ void MainWindow::startPlayback()
         }
         updateVideoFrame(std::move(frame));
     });
+    connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
+        if (!frame) {
+            return;
+        }
+        if (!videoSurface_) {
+            showPlaybackState({});
+        }
+        updateVideoDmaFrame(std::move(frame));
+    });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
         logCaptureStartup("failed", message);
         if (!isExpectedDeviceRemovalMessage(message)) {
@@ -1381,16 +1570,22 @@ void MainWindow::startPlayback()
 
     const auto deviceSnapshot = selectedDevice_;
     const auto formatSnapshot = selectedFormat_;
+    const auto dmaDisplayRequested = deviceSnapshot.backend == capture::CaptureBackend::V4L2 &&
+        formatSnapshot.pixelFormat.compare(QStringLiteral("NV12"), Qt::CaseInsensitive) == 0 &&
+        canCreateOpenGLContext();
     logCaptureStartup(
         "queuing CaptureSession::start",
         QStringLiteral("%1 (%2)").arg(deviceSnapshot.devicePath, formatSnapshot.label));
     QMetaObject::invokeMethod(
         captureSession_.get(),
-        [this, deviceSnapshot, formatSnapshot]() {
+        [this, deviceSnapshot, formatSnapshot, dmaDisplayRequested]() {
             logCaptureStartup(
                 "CaptureSession::start on worker thread",
                 QStringLiteral("thread=%1").arg(
                     QString::number(reinterpret_cast<quintptr>(QThread::currentThreadId()), 16)));
+            if (auto *v4l2 = qobject_cast<platform::linux::V4L2CaptureSession *>(captureSession_.get())) {
+                v4l2->setDmaBufDisplayRequested(dmaDisplayRequested);
+            }
             const auto started = captureSession_->start(deviceSnapshot, formatSnapshot);
             logCaptureStartup("CaptureSession::start finished", started ? QStringLiteral("ok") : QStringLiteral("failed"));
         },
@@ -1491,6 +1686,20 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     auto *video = new VideoSurface(root);
     video->setPresentCadenceMs(presentIntervalMsFromFps(selectedFormat_.framesPerSecond));
     videoSurface_ = video;
+    video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
+        if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
+            return;
+        }
+        auto *session = captureSession_.get();
+        QMetaObject::invokeMethod(
+            session,
+            [session, frame = std::move(frame)]() mutable {
+                if (auto *v4l2 = qobject_cast<platform::linux::V4L2CaptureSession *>(session)) {
+                    v4l2->finishDmaFrameAsCpu(std::move(frame));
+                }
+            },
+            Qt::BlockingQueuedConnection);
+    });
 
     auto *statsOverlay = new QLabel(video);
     statsOverlay->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -1586,6 +1795,15 @@ void MainWindow::updateVideoFrame(capture::FrameHandle frame)
     }
 
     videoSurface_->setPendingFrame(std::move(frame));
+}
+
+void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
+{
+    if (!videoSurface_ || !frame) {
+        return;
+    }
+
+    videoSurface_->setPendingDmaFrame(std::move(frame));
 }
 
 void MainWindow::updateStatsOverlay()
@@ -1724,21 +1942,39 @@ void MainWindow::stopPlayback()
         audioSession_.reset();
     }
 
-    if (captureSession_) {
-        if (captureThread_ && captureThread_->isRunning()) {
+    if (videoSurface_) {
+        videoSurface_->releasePlaybackFrames();
+    }
+
+    auto *session = captureSession_.release();
+    auto *thread = captureThread_;
+    captureThread_ = nullptr;
+
+    if (session != nullptr) {
+        if (thread != nullptr && thread->isRunning()) {
             QMetaObject::invokeMethod(
-                captureSession_.get(), &capture::CaptureSession::stop, Qt::BlockingQueuedConnection);
+                session,
+                [session, thread]() {
+                    session->stop();
+                    delete session;
+                    thread->quit();
+                },
+                Qt::BlockingQueuedConnection);
+            thread->wait();
+            delete thread;
         } else {
-            captureSession_->stop();
+            session->stop();
+            delete session;
+            if (thread != nullptr) {
+                delete thread;
+            }
         }
-        captureSession_.reset();
+    } else if (thread != nullptr) {
+        thread->quit();
+        thread->wait();
+        delete thread;
     }
-    if (captureThread_) {
-        captureThread_->quit();
-        captureThread_->wait();
-        delete captureThread_;
-        captureThread_ = nullptr;
-    }
+
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
@@ -1759,6 +1995,13 @@ void MainWindow::stopPlaybackAsync()
         audioSession_.reset();
     }
 
+    if (videoSurface_) {
+        videoSurface_->releasePlaybackFrames();
+    }
+    if (captureSession_ && captureThread_ && captureThread_->isRunning()) {
+        QMetaObject::invokeMethod(captureSession_.get(), []() {}, Qt::BlockingQueuedConnection);
+    }
+
     auto *session = captureSession_.release();
     auto *thread = captureThread_;
     captureThread_ = nullptr;
@@ -1767,41 +2010,35 @@ void MainWindow::stopPlaybackAsync()
         statsOverlayTimer_->stop();
     }
     statsOverlay_.clear();
-    videoSurface_.clear();
     playbackControls_.clear();
-    showStoppingState();
 
-    if (session == nullptr) {
-        if (thread != nullptr) {
-            connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-            connect(thread, &QThread::finished, this, [this]() { finishPlaybackStopped(); });
-            thread->quit();
+    if (session != nullptr) {
+        QObject::disconnect(session, nullptr, this, nullptr);
+        if (thread != nullptr && thread->isRunning()) {
+            QMetaObject::invokeMethod(
+                session,
+                [session, thread]() {
+                    session->stop();
+                    delete session;
+                    thread->quit();
+                },
+                Qt::BlockingQueuedConnection);
+            thread->wait();
+            delete thread;
         } else {
-            finishPlaybackStopped();
+            session->stop();
+            delete session;
+            if (thread != nullptr) {
+                delete thread;
+            }
         }
-        return;
-    }
-
-    QObject::disconnect(session, nullptr, this, nullptr);
-    if (thread != nullptr && thread->isRunning()) {
-        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-        connect(thread, &QThread::finished, this, [this]() { finishPlaybackStopped(); });
-        QMetaObject::invokeMethod(
-            session,
-            [session, thread]() {
-                session->stop();
-                delete session;
-                thread->quit();
-            },
-            Qt::QueuedConnection);
-        return;
-    }
-
-    session->stop();
-    delete session;
-    if (thread != nullptr) {
+    } else if (thread != nullptr) {
+        thread->quit();
+        thread->wait();
         delete thread;
     }
+
+    videoSurface_.clear();
     finishPlaybackStopped();
 }
 

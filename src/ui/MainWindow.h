@@ -2,6 +2,7 @@
 
 #include "capture/CaptureSession.h"
 #include "capture/CaptureTypes.h"
+#include "capture/DmaBufFrame.h"
 #include "settings/AppSettings.h"
 
 #include <QImage>
@@ -39,6 +40,7 @@ private:
     void showStoppingState();
     void showPlaybackState(capture::FrameHandle firstFrame = {});
     void updateVideoFrame(capture::FrameHandle frame);
+    void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
     void updateStatsOverlay();
     QString buildStatsOverlayText() const;
     void stopPlayback();

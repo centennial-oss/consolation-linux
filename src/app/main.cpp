@@ -1,6 +1,7 @@
 #include "AppMetadata.h"
 #include "capture/CaptureTypes.h"
 #include "ui/AppIcon.h"
+#include "capture/DmaBufFrame.h"
 #include "ui/MainWindow.h"
 
 #include <QApplication>
@@ -8,6 +9,7 @@
 int main(int argc, char *argv[])
 {
     qRegisterMetaType<consolation::capture::FrameHandle>();
+    qRegisterMetaType<consolation::capture::DmaBufFrameHandle>();
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(consolation::app::AppMetadata::displayName);

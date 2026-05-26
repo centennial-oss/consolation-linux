@@ -1,6 +1,7 @@
 #pragma once
 
 #include "capture/CaptureTypes.h"
+#include "capture/DmaBufFrame.h"
 
 #include <QObject>
 
@@ -22,6 +23,7 @@ public:
 
 signals:
     void frameReady(FrameHandle frame);
+    void dmaFrameReady(DmaBufFrameHandle frame);
     void telemetryReady(const VideoTelemetrySnapshot &snapshot);
     void failed(const QString &message);
     void logMessage(const QString &message);

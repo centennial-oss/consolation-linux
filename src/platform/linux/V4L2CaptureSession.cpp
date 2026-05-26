@@ -144,6 +144,10 @@ bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const captu
 
 void V4L2CaptureSession::stop()
 {
+    dmaBufDisplayRequested_.store(false);
+    const auto wasStreaming = streaming_;
+    streaming_ = false;
+
     if (notifier_ != nullptr) {
         emit logMessage(QStringLiteral("V4L2 stop disabling socket notifier"));
         notifier_->setEnabled(false);
@@ -151,14 +155,13 @@ void V4L2CaptureSession::stop()
         notifier_ = nullptr;
     }
 
-    if (fd_ >= 0 && streaming_) {
+    if (fd_ >= 0 && wasStreaming) {
         emit logMessage(QStringLiteral("V4L2 stopping stream with VIDIOC_STREAMOFF"));
         v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         if (xioctl(fd_, VIDIOC_STREAMOFF, &type) != 0) {
             emit logMessage(QStringLiteral("V4L2 STREAMOFF failed during stop: %1")
                                 .arg(QString::fromLocal8Bit(std::strerror(errno))));
         }
-        streaming_ = false;
     }
 
     cleanupBuffers();
@@ -341,6 +344,20 @@ bool V4L2CaptureSession::allocateBuffers()
             emit failed(QStringLiteral("Could not map capture buffer: %1").arg(QString::fromLocal8Bit(std::strerror(errno))));
             return false;
         }
+
+        v4l2_exportbuffer exportRequest {};
+        exportRequest.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        exportRequest.index = index;
+        exportRequest.plane = 0;
+        if (xioctl(fd_, VIDIOC_EXPBUF, &exportRequest) == 0) {
+            buffers_[index].dmaFd = exportRequest.fd;
+            dmaBufExportSupported_ = true;
+        }
+    }
+
+    if (dmaBufExportSupported_ && pixelFormat_ == V4L2_PIX_FMT_NV12) {
+        dmaBufDisplayEnabled_ = true;
+        emit logMessage(QStringLiteral("V4L2 NV12 DMA-BUF export enabled for zero-copy display"));
     }
 
     return true;
@@ -411,6 +428,14 @@ void V4L2CaptureSession::handleReadyRead()
     }
 
     if (pending.index < buffers_.size()) {
+        if (useDmaBufDisplayPath()) {
+            if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
+                recordDecodedFrame(static_cast<int>(pending.bytesused), 0);
+                emit dmaFrameReady(std::move(dmaFrame));
+                return;
+            }
+        }
+
         const auto decodeStartNs = monotonicNs();
         auto frame = decodeFrame(buffers_[pending.index].start, static_cast<int>(pending.bytesused));
         const auto decodeNs = monotonicNs() - decodeStartNs;
@@ -681,9 +706,110 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
     telemetryPayloadTotalBytes_ = 0;
 }
 
+void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
+{
+    dmaBufDisplayRequested_.store(requested);
+}
+
+bool V4L2CaptureSession::useDmaBufDisplayPath() const
+{
+    return dmaBufDisplayRequested_.load() && dmaBufDisplayEnabled_ && dmaBufExportSupported_ &&
+        pixelFormat_ == V4L2_PIX_FMT_NV12 && fd_ >= 0 && streaming_;
+}
+
+capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_buffer &buffer)
+{
+    if (buffer.index >= buffers_.size()) {
+        return {};
+    }
+
+    const auto &captureBuffer = buffers_[buffer.index];
+    if (captureBuffer.dmaFd < 0) {
+        return {};
+    }
+
+    auto *payload = new capture::DmaBufFrame();
+    payload->bufferIndex = static_cast<int>(buffer.index);
+    payload->dmaFd = captureBuffer.dmaFd;
+    payload->width = width_;
+    payload->height = height_;
+    payload->stride = std::max(bytesPerLine_, width_);
+    payload->bytesUsed = static_cast<int>(buffer.bytesused);
+
+    return capture::DmaBufFrameHandle(payload, [this](capture::DmaBufFrame *frame) {
+        if (frame != nullptr) {
+            const auto index = frame->bufferIndex;
+            if (streaming_ && fd_ >= 0) {
+                QMetaObject::invokeMethod(
+                    this,
+                    "requeueCaptureBuffer",
+                    Qt::QueuedConnection,
+                    Q_ARG(int, index));
+            }
+            delete frame;
+        }
+    });
+}
+
+void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
+{
+    if (!frame) {
+        return;
+    }
+
+    if (dmaBufDisplayRequested_.load()) {
+        emit logMessage(QStringLiteral("NV12 DMA-BUF display falling back to libyuv CPU decode"));
+    }
+    dmaBufDisplayRequested_.store(false);
+
+    const auto bufferIndex = frame->bufferIndex;
+    const auto bytesUsed = frame->bytesUsed;
+
+    if (!streaming_ || fd_ < 0 || bufferIndex < 0 || bufferIndex >= static_cast<int>(buffers_.size())) {
+        frame.reset();
+        return;
+    }
+
+    const auto decodeStartNs = monotonicNs();
+    auto cpuFrame = decodeFrame(buffers_[static_cast<size_t>(bufferIndex)].start, bytesUsed);
+    const auto decodeNs = monotonicNs() - decodeStartNs;
+    frame.reset();
+
+    if (cpuFrame && !cpuFrame->isNull()) {
+        recordDecodedFrame(bytesUsed, decodeNs);
+        emit frameReady(std::move(cpuFrame));
+    }
+}
+
+void V4L2CaptureSession::requeueCaptureBuffer(const int bufferIndex)
+{
+    if (!streaming_ || fd_ < 0 || bufferIndex < 0 || bufferIndex >= static_cast<int>(buffers_.size())) {
+        return;
+    }
+
+    v4l2_buffer buffer {};
+    buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buffer.memory = V4L2_MEMORY_MMAP;
+    buffer.index = static_cast<__u32>(bufferIndex);
+
+    if (xioctl(fd_, VIDIOC_QBUF, &buffer) != 0) {
+        emit logMessage(
+            QStringLiteral("V4L2 DMA-BUF requeue failed for buffer %1: %2")
+                .arg(bufferIndex)
+                .arg(QString::fromLocal8Bit(std::strerror(errno))));
+    }
+}
+
 void V4L2CaptureSession::cleanupBuffers()
 {
+    dmaBufDisplayEnabled_ = false;
+    dmaBufExportSupported_ = false;
+
     for (auto &buffer : buffers_) {
+        if (buffer.dmaFd >= 0) {
+            ::close(buffer.dmaFd);
+            buffer.dmaFd = -1;
+        }
         if (buffer.start != nullptr) {
             ::munmap(buffer.start, buffer.length);
             buffer.start = nullptr;
