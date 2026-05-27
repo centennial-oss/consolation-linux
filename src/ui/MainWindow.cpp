@@ -1266,7 +1266,6 @@ constexpr auto playbackSliderStyle = R"(
     }
     QSlider::sub-page:horizontal {
         background: #CC11BB;
-        border-radius: 3px;
     }
     QSlider::add-page:horizontal {
         background: rgba(255, 255, 255, 145);
@@ -1274,10 +1273,10 @@ constexpr auto playbackSliderStyle = R"(
     }
     QSlider::handle:horizontal {
         background: #CC11BB;
-        border: 0px solid transparent;
-        width: 18px;
-        height: 18px;
-        margin: -9px 0;
+        border: 2px solid #cccccc;
+        width: 14px;
+        height: 14px;
+        margin: -7px 0;
         border-radius: 9px;
     }
 )";
