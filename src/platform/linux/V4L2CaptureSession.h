@@ -67,6 +67,7 @@ private:
     bool streaming_ = false;
     std::vector<Buffer> buffers_;
     std::shared_ptr<capture::FrameBufferPool> framePool_;
+    std::shared_ptr<std::vector<capture::DmaBufFrame>> dmaFramePool_;
     bool dmaBufExportSupported_ = false;
     bool dmaBufDisplayEnabled_ = false;
     std::atomic<bool> dmaBufDisplayRequested_ { false };

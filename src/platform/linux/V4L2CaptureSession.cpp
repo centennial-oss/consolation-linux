@@ -163,6 +163,7 @@ void V4L2CaptureSession::stop()
         framePool_->reset();
         framePool_.reset();
     }
+    dmaFramePool_.reset();
     emit logMessage(QStringLiteral("V4L2 stop complete"));
 }
 
@@ -320,6 +321,7 @@ bool V4L2CaptureSession::allocateBuffers()
     emit logMessage(QStringLiteral("V4L2 driver allocated %1 capture buffers").arg(request.count));
 
     buffers_.resize(request.count);
+    dmaFramePool_ = std::make_shared<std::vector<capture::DmaBufFrame>>(request.count);
     auto dmaBufExportSupportedForAllBuffers = true;
     for (auto index = 0U; index < request.count; ++index) {
         v4l2_buffer buffer {};
@@ -799,7 +801,7 @@ bool V4L2CaptureSession::useDmaBufDisplayPath() const
 
 capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_buffer &buffer)
 {
-    if (buffer.index >= buffers_.size()) {
+    if (buffer.index >= buffers_.size() || !dmaFramePool_) {
         return {};
     }
 
@@ -808,35 +810,36 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
         return {};
     }
 
-    auto *payload = new capture::DmaBufFrame();
-    payload->bufferIndex = static_cast<int>(buffer.index);
-    payload->dmaFd = captureBuffer.dmaFd;
-    payload->width = width_;
-    payload->height = height_;
-    payload->bytesUsed = static_cast<int>(buffer.bytesused);
-    payload->capturedAtNs = captureBuffer.capturedAtNs;
+    // Use the pre-allocated pool slot for this V4L2 buffer index — no heap allocation per frame.
+    capture::DmaBufFrame &slot = (*dmaFramePool_)[buffer.index];
+    slot.bufferIndex = static_cast<int>(buffer.index);
+    slot.dmaFd = captureBuffer.dmaFd;
+    slot.width = width_;
+    slot.height = height_;
+    slot.bytesUsed = static_cast<int>(buffer.bytesused);
+    slot.capturedAtNs = captureBuffer.capturedAtNs;
+    slot.flipVertical = false;
 
     if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
-        payload->layout = capture::DmaBufLayout::Nv12;
-        payload->stride = std::max(bytesPerLine_, width_);
+        slot.layout = capture::DmaBufLayout::Nv12;
+        slot.stride = std::max(bytesPerLine_, width_);
     } else if (pixelFormat_ == V4L2_PIX_FMT_RGB24) {
-        payload->layout = capture::DmaBufLayout::Rgb888;
-        payload->stride = std::max(bytesPerLine_, width_ * 3);
+        slot.layout = capture::DmaBufLayout::Rgb888;
+        slot.stride = std::max(bytesPerLine_, width_ * 3);
     } else if (pixelFormat_ == V4L2_PIX_FMT_BGR24) {
-        payload->layout = capture::DmaBufLayout::Bgr888;
-        payload->stride = std::max(bytesPerLine_, width_ * 3);
-        payload->flipVertical = true;
+        slot.layout = capture::DmaBufLayout::Bgr888;
+        slot.stride = std::max(bytesPerLine_, width_ * 3);
+        slot.flipVertical = true;
     } else if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
-        payload->layout = capture::DmaBufLayout::Yuyv422;
-        payload->stride = std::max(bytesPerLine_, width_ * 2);
+        slot.layout = capture::DmaBufLayout::Yuyv422;
+        slot.stride = std::max(bytesPerLine_, width_ * 2);
     } else if (pixelFormat_ == V4L2_PIX_FMT_YUV420) {
-        payload->layout = capture::DmaBufLayout::I420;
-        payload->stride = std::max(bytesPerLine_, width_);
+        slot.layout = capture::DmaBufLayout::I420;
+        slot.stride = std::max(bytesPerLine_, width_);
     } else if (pixelFormat_ == V4L2_PIX_FMT_YVU420) {
-        payload->layout = capture::DmaBufLayout::Yv12;
-        payload->stride = std::max(bytesPerLine_, width_);
+        slot.layout = capture::DmaBufLayout::Yv12;
+        slot.stride = std::max(bytesPerLine_, width_);
     } else {
-        delete payload;
         return {};
     }
 
@@ -844,12 +847,15 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     // requeues in one pass. When the bitmask transitions empty→non-empty we also post a
     // QueuedConnection event so the capture thread wakes up even if no V4L2 frames are arriving
     // (which would otherwise deadlock if all buffers were simultaneously pending requeue).
+    // The pool shared_ptr is captured to keep the DmaBufFrame slots alive for as long as any
+    // handle is outstanding — safe even if the session is destroyed first.
     auto pending = requeuePending_;
+    auto pool = dmaFramePool_;
     const auto bufferIndex = static_cast<int>(buffer.index);
     const QPointer<V4L2CaptureSession> session(this);
-    return capture::DmaBufFrameHandle(payload,
-        [pending = std::move(pending), bufferIndex, session](capture::DmaBufFrame *frame) {
-            delete frame;
+    return capture::DmaBufFrameHandle(&slot,
+        [pending = std::move(pending), pool = std::move(pool), bufferIndex, session](capture::DmaBufFrame *) {
+            // No delete — slot is owned by the pool, not the handle.
             const auto prev = pending->fetch_or(uint64_t{1} << bufferIndex, std::memory_order_release);
             if (prev == 0 && session) {
                 // First bit in this batch — wake the capture thread so it calls drainRequeuePending().
