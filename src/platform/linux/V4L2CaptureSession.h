@@ -31,6 +31,7 @@ public:
     void setDmaBufDisplayRequested(const bool requested);
 
     Q_INVOKABLE void finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame);
+    Q_INVOKABLE void recordDmaFramePresented(int bytesUsed);
 
 private:
     struct Buffer {

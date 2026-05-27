@@ -387,6 +387,7 @@ class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
 public:
     using DmaGlFailedHandler = std::function<void()>;
     using DmaCpuFallbackHandler = std::function<void(capture::DmaBufFrameHandle)>;
+    using DmaPresentedHandler = std::function<void(int bytesUsed)>;
 
     explicit GpuFrameRenderer(QWidget *parent = nullptr)
         : QOpenGLWidget(parent)
@@ -407,6 +408,11 @@ public:
     void setDmaCpuFallbackHandler(DmaCpuFallbackHandler handler)
     {
         dmaCpuFallbackHandler_ = std::move(handler);
+    }
+
+    void setDmaPresentedHandler(DmaPresentedHandler handler)
+    {
+        dmaPresentedHandler_ = std::move(handler);
     }
 
     void setViewOrientation(const int rotationDegrees, const bool flipHorizontal, const bool flipVertical) override
@@ -767,6 +773,9 @@ private:
 
         activeGlRenderer_ = rendererIndex;
         drawFn();
+        if (dmaPresentedHandler_) {
+            dmaPresentedHandler_(frame.bytesUsed);
+        }
         reportFramePresented();
         notifyFirstFramePainted();
         completeDmaPresent(frame.bufferIndex);
@@ -841,6 +850,7 @@ private:
     capture::DmaBufLayout boundDmaLayout_ = capture::DmaBufLayout::Unknown;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
+    DmaPresentedHandler dmaPresentedHandler_;
     std::function<void()> firstFramePaintedHandler_;
     QRect targetRect_;
     QSize lastSrcSize_;
@@ -903,6 +913,14 @@ public:
             }
             if (dmaCpuFallbackHandler_) {
                 renderer->setDmaCpuFallbackHandler(dmaCpuFallbackHandler_);
+            }
+            if (dmaPresentedHandler_) {
+                renderer->setDmaPresentedHandler([this](const int bytesUsed) {
+                    presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
+                    if (dmaPresentedHandler_) {
+                        dmaPresentedHandler_(bytesUsed);
+                    }
+                });
             }
             std::cout << "[MainWindow capture] video renderer: OpenGL" << std::endl;
         } else {
@@ -978,6 +996,19 @@ public:
         dmaCpuFallbackHandler_ = std::move(handler);
         if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
             gpu->setDmaCpuFallbackHandler(dmaCpuFallbackHandler_);
+        }
+    }
+
+    void setDmaPresentedHandler(GpuFrameRenderer::DmaPresentedHandler handler)
+    {
+        dmaPresentedHandler_ = std::move(handler);
+        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
+            gpu->setDmaPresentedHandler([this](const int bytesUsed) {
+                presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
+                if (dmaPresentedHandler_) {
+                    dmaPresentedHandler_(bytesUsed);
+                }
+            });
         }
     }
 
@@ -1104,7 +1135,6 @@ private:
     {
         if (pendingDmaFrame_) {
             renderer_->setDmaFrame(std::move(pendingDmaFrame_));
-            presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
             uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -1179,6 +1209,7 @@ private:
     QWidget *rendererWidget_ = nullptr;
     GpuFrameRenderer::DmaGlFailedHandler dmaGlFailedHandler_;
     GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
+    GpuFrameRenderer::DmaPresentedHandler dmaPresentedHandler_;
     FrameRenderer::FramePresentedHandler framePresentedHandler_;
     capture::FrameHandle pendingFrame_;
     capture::DmaBufFrameHandle pendingDmaFrame_;
@@ -2390,6 +2421,7 @@ void MainWindow::showConnectingState()
     displayPath_ = capture::VideoDisplayPath::Unknown;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
+    dmaFallbackForcedCpu_ = false;
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
@@ -2424,6 +2456,7 @@ void MainWindow::showStoppingState()
     displayPath_ = capture::VideoDisplayPath::Unknown;
     uiFps_ = 0.0;
     paintFps_ = 0.0;
+    dmaFallbackForcedCpu_ = false;
     if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->stop();
     }
@@ -2460,12 +2493,24 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     auto *video = new VideoSurface(root);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
+    dmaFallbackForcedCpu_ = false;
     video->setFramePresentedHandler([this](const qint64 latencyNs) { recordPresentLatency(latencyNs); });
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
             return;
         }
         auto *session = captureSession_.get();
+        if (!dmaFallbackForcedCpu_) {
+            dmaFallbackForcedCpu_ = true;
+            QMetaObject::invokeMethod(
+                session,
+                [session]() {
+                    if (auto *v4l2 = qobject_cast<platform::linux::V4L2CaptureSession *>(session)) {
+                        v4l2->setDmaBufDisplayRequested(false);
+                    }
+                },
+                Qt::QueuedConnection);
+        }
         QMetaObject::invokeMethod(
             session,
             [session, frame = std::move(frame)]() mutable {
@@ -2474,6 +2519,20 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
                 }
             },
             Qt::BlockingQueuedConnection);
+    });
+    video->setDmaPresentedHandler([this](const int bytesUsed) {
+        if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || bytesUsed <= 0) {
+            return;
+        }
+        auto *session = captureSession_.get();
+        QMetaObject::invokeMethod(
+            session,
+            [session, bytesUsed]() {
+                if (auto *v4l2 = qobject_cast<platform::linux::V4L2CaptureSession *>(session)) {
+                    v4l2->recordDmaFramePresented(bytesUsed);
+                }
+            },
+            Qt::QueuedConnection);
     });
 
     auto *statsOverlay = new QLabel(video);

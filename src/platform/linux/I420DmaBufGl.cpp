@@ -3,6 +3,8 @@
 #include <QOpenGLContext>
 #include <QRect>
 
+#include <array>
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
@@ -56,9 +58,10 @@ struct ShaderSources {
     const char *vertex = nullptr;
     const char *fragment = nullptr;
     bool bindAttribLocations = false;
+    const char *label = nullptr;
 };
 
-ShaderSources pickShaderSources(const QOpenGLContext *context)
+std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
 {
     static constexpr char esVertexShader[] = R"(
         attribute vec2 aPos;
@@ -147,15 +150,19 @@ ShaderSources pickShaderSources(const QOpenGLContext *context)
         }
     )";
 
+    const ShaderSources esProfile {esVertexShader, esFragmentShader, true, "es"};
+    const ShaderSources gl330Profile {gl330VertexShader, gl330FragmentShader, false, "gl330"};
+    const ShaderSources gl120Profile {gl120VertexShader, gl120FragmentShader, true, "gl120"};
+
     if (context != nullptr && context->isOpenGLES()) {
-        return {esVertexShader, esFragmentShader, true};
+        return {esProfile, gl120Profile, gl330Profile};
     }
 
     if (context != nullptr && context->format().majorVersion() >= 3) {
-        return {gl330VertexShader, gl330FragmentShader, false};
+        return {gl330Profile, gl120Profile, esProfile};
     }
 
-    return {gl120VertexShader, gl120FragmentShader, true};
+    return {gl120Profile, esProfile, gl330Profile};
 }
 
 bool compileShader(
@@ -334,36 +341,46 @@ bool I420DmaBufGl::initialize()
     }
 
     const auto *context = QOpenGLContext::currentContext();
-    const auto sources = pickShaderSources(context);
+    QStringList shaderFailures;
+    for (const auto &sources : shaderCandidates(context)) {
+        unsigned int vertex = 0;
+        unsigned int fragment = 0;
+        QString failure;
+        if (!compileShader(*this, GL_VERTEX_SHADER, sources.vertex, vertex, failure)) {
+            shaderFailures << QStringLiteral("%1 vertex: %2").arg(QString::fromLatin1(sources.label), failure);
+            continue;
+        }
+        if (!compileShader(*this, GL_FRAGMENT_SHADER, sources.fragment, fragment, failure)) {
+            glDeleteShader(vertex);
+            shaderFailures << QStringLiteral("%1 fragment: %2").arg(QString::fromLatin1(sources.label), failure);
+            continue;
+        }
 
-    unsigned int vertex = 0;
-    unsigned int fragment = 0;
-    if (!compileShader(*this, GL_VERTEX_SHADER, sources.vertex, vertex, lastInitFailure_)) {
-        return false;
-    }
-    if (!compileShader(*this, GL_FRAGMENT_SHADER, sources.fragment, fragment, lastInitFailure_)) {
+        programId_ = glCreateProgram();
+        glAttachShader(programId_, vertex);
+        glAttachShader(programId_, fragment);
+        if (sources.bindAttribLocations) {
+            glBindAttribLocation(programId_, 0, "aPos");
+            glBindAttribLocation(programId_, 1, "aTexCoord");
+        }
+        glLinkProgram(programId_);
+        GLint linkStatus = GL_FALSE;
+        glGetProgramiv(programId_, GL_LINK_STATUS, &linkStatus);
         glDeleteShader(vertex);
-        return false;
-    }
+        glDeleteShader(fragment);
 
-    programId_ = glCreateProgram();
-    glAttachShader(programId_, vertex);
-    glAttachShader(programId_, fragment);
-    if (sources.bindAttribLocations) {
-        glBindAttribLocation(programId_, 0, "aPos");
-        glBindAttribLocation(programId_, 1, "aTexCoord");
-    }
-    glLinkProgram(programId_);
-    GLint linkStatus = GL_FALSE;
-    glGetProgramiv(programId_, GL_LINK_STATUS, &linkStatus);
-    glDeleteShader(vertex);
-    glDeleteShader(fragment);
+        if (linkStatus == GL_TRUE) {
+            break;
+        }
 
-    if (linkStatus != GL_TRUE) {
-        lastInitFailure_ =
-            QStringLiteral("I420 shader program link failed: %1").arg(programLinkLog(*this, programId_));
+        shaderFailures << QStringLiteral("%1 link: %2")
+                              .arg(QString::fromLatin1(sources.label), programLinkLog(*this, programId_));
         glDeleteProgram(programId_);
         programId_ = 0;
+    }
+
+    if (programId_ == 0) {
+        lastInitFailure_ = QStringLiteral("I420 shader init failed (%1)").arg(shaderFailures.join(QStringLiteral("; ")));
         return false;
     }
 

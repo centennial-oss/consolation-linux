@@ -43,6 +43,8 @@ SET_BUILD_INFO_SCRIPT := scripts/set-build-info.sh
 	test-linux-fedora-42 \
 	build-linux-fedora-44 \
 	test-linux-fedora-44 \
+	build-rpi-os-trixie \
+	build-rpi-os-trixie-arm64 \
 	build-linux-rpi-os-trixie \
 	test-linux-rpi-os-trixie
 
@@ -164,6 +166,14 @@ test-linux-fedora-44: build-linux-fedora-44
 build-linux-rpi-os-trixie:
 	cmake --preset rpi-os-trixie
 	cmake --build --preset rpi-os-trixie
+
+build-rpi-os-trixie: build-rpi-os-trixie-arm64
+
+build-rpi-os-trixie-arm64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=arm64; \
+	$(MAKE) build-linux-rpi-os-trixie; \
+	cd build-rpi-os-trixie && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-rpi-os-trixie-arm64
 
 test-linux-rpi-os-trixie: build-linux-rpi-os-trixie
 	ctest --preset rpi-os-trixie

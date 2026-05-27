@@ -448,7 +448,6 @@ void V4L2CaptureSession::handleReadyRead()
             const auto bytesUsed = static_cast<int>(pending.bytesused);
             if (frameReadyForDmaDisplay(bytesUsed, pending.flags)) {
                 if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
-                    recordDecodedFrame(bytesUsed, 0, true);
                     emit dmaFrameReady(std::move(dmaFrame));
                     return;
                 }
@@ -898,6 +897,14 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
         recordDecodedFrame(bytesUsed, decodeNs, false);
         emit frameReady(std::move(cpuFrame), capturedAtNs);
     }
+}
+
+void V4L2CaptureSession::recordDmaFramePresented(const int bytesUsed)
+{
+    if (bytesUsed <= 0 || !streaming_ || fd_ < 0) {
+        return;
+    }
+    recordDecodedFrame(bytesUsed, 0, true);
 }
 
 void V4L2CaptureSession::drainRequeuePending()
