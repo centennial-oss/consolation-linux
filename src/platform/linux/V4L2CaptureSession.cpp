@@ -310,7 +310,7 @@ bool V4L2CaptureSession::allocateBuffers()
 {
     emit logMessage(QStringLiteral("V4L2 requesting mmap capture buffers"));
     v4l2_requestbuffers request {};
-    request.count = 4;
+    request.count = captureBufferCount;
     request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     request.memory = V4L2_MEMORY_MMAP;
 

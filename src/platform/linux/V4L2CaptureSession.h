@@ -18,6 +18,10 @@ class V4L2CaptureSession final : public capture::CaptureSession {
     Q_OBJECT
 
 public:
+    // Driver mmap slots (not display queue depth). Extra slots add ~buffer.length RAM each; the
+    // driver may allocate fewer than requested. Helps DMA path when the UI briefly holds a buffer.
+    static constexpr unsigned captureBufferCount = 8;
+
     explicit V4L2CaptureSession(QObject *parent = nullptr);
     ~V4L2CaptureSession() override;
 
