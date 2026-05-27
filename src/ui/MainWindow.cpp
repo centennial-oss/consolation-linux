@@ -2743,24 +2743,25 @@ QString MainWindow::formatStatsOverlayText() const
         pixelFormat,
         QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
         QStringLiteral("Lag:%1").arg(qRound(presentLagAvgMs_)),
-        QStringLiteral("Mem:%1").arg(frameMemory),
-        QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
 
     if (!debugStatsEnabled_) {
         return fields.join(QStringLiteral(" | "));
     }
 
+    if (displayPath_ != capture::VideoDisplayPath::Gpu) {
+        fields += QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1));
+    }
+
     QStringList advanced {
+        QStringLiteral("%1").arg(frameMemory),
+        QStringLiteral("%1").arg(capture::displayPathLabel(displayPath_)),
         QStringLiteral("UI:%1").arg(QString::number(uiFps_, 'f', 0)),
         QStringLiteral("Paint:%1").arg(QString::number(paintFps_, 'f', 0)),
         QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
         QStringLiteral("Buf:%1").arg(latestTelemetry_.bufferCount),
         QStringLiteral("Payload:%1KiB").arg(QString::number(latestTelemetry_.payloadAvgKb, 'f', 0)),
     };
-    if (displayPath_ != capture::VideoDisplayPath::Gpu) {
-        advanced << QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1));
-    }
     fields += advanced;
     return fields.join(QStringLiteral(" | "));
 }
@@ -3084,12 +3085,12 @@ void MainWindow::showSettingsDialog()
     layout->addLayout(makeModalHeader(QStringLiteral("Settings"), QString(), 48, &dialog));
     layout->addWidget(makeDivider(&dialog));
 
-    auto *statsLabel = new QLabel(QStringLiteral("Stats overlay"), &dialog);
+    auto *statsLabel = new QLabel(QStringLiteral("Video Stats"), &dialog);
     statsLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
     layout->addWidget(statsLabel);
     auto *statsOff = new QRadioButton(QStringLiteral("Off"), &dialog);
-    auto *statsBottomLeft = new QRadioButton(QStringLiteral("Bottom left"), &dialog);
-    auto *statsBottomRight = new QRadioButton(QStringLiteral("Bottom right"), &dialog);
+    auto *statsBottomLeft = new QRadioButton(QStringLiteral("Bottom Left"), &dialog);
+    auto *statsBottomRight = new QRadioButton(QStringLiteral("Bottom Right"), &dialog);
     auto *statsGroup = new QButtonGroup(&dialog);
     statsGroup->addButton(statsOff, static_cast<int>(StatsOverlayPosition::Off));
     statsGroup->addButton(statsBottomLeft, static_cast<int>(StatsOverlayPosition::BottomLeft));
@@ -3105,9 +3106,9 @@ void MainWindow::showSettingsDialog()
     statsRow->addStretch();
     layout->addLayout(statsRow);
 
-    auto *lowFpsToggle = new QCheckBox(QStringLiteral("Low FPS warnings"), &dialog);
+    auto *lowFpsToggle = new QCheckBox(QStringLiteral("Show Low FPS Warnings"), &dialog);
     lowFpsToggle->setChecked(lowFpsWarningsEnabled_);
-    auto *debugToggle = new QCheckBox(QStringLiteral("Show advanced stats"), &dialog);
+    auto *debugToggle = new QCheckBox(QStringLiteral("Show Advanced Video Stats"), &dialog);
     debugToggle->setChecked(debugStatsEnabled_);
     debugToggle->setEnabled(statsOverlayPosition_ != StatsOverlayPosition::Off);
     auto *statsTogglesRow = new QHBoxLayout();
@@ -3118,7 +3119,7 @@ void MainWindow::showSettingsDialog()
     layout->addLayout(statsTogglesRow);
 
     layout->addWidget(makeDivider(&dialog));
-    auto *rotationLabel = new QLabel(QStringLiteral("Rotation"), &dialog);
+    auto *rotationLabel = new QLabel(QStringLiteral("Video Rotation"), &dialog);
     rotationLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
     layout->addWidget(rotationLabel);
     auto *rot0 = new QRadioButton(QStringLiteral("0°"), &dialog);
@@ -3144,9 +3145,9 @@ void MainWindow::showSettingsDialog()
     rotationRow->addStretch();
     layout->addLayout(rotationRow);
 
-    auto *flipH = new QCheckBox(QStringLiteral("Flip horizontal"), &dialog);
+    auto *flipH = new QCheckBox(QStringLiteral("Flip Horizontal"), &dialog);
     flipH->setChecked(flipHorizontal_);
-    auto *flipV = new QCheckBox(QStringLiteral("Flip vertical"), &dialog);
+    auto *flipV = new QCheckBox(QStringLiteral("Flip Vertical"), &dialog);
     flipV->setChecked(flipVertical_);
     auto *flipRow = new QHBoxLayout();
     flipRow->setSpacing(22);
@@ -3156,10 +3157,10 @@ void MainWindow::showSettingsDialog()
     layout->addLayout(flipRow);
 
     layout->addWidget(makeDivider(&dialog));
-    auto *graphicsLabel = new QLabel(QStringLiteral("Graphics"), &dialog);
+    auto *graphicsLabel = new QLabel(QStringLiteral("Graphics Performance"), &dialog);
     graphicsLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
     layout->addWidget(graphicsLabel);
-    auto *disableGpuToggle = new QCheckBox(QStringLiteral("Disable GPU (use MMAP/CPU)"), &dialog);
+    auto *disableGpuToggle = new QCheckBox(QStringLiteral("Disable GPU Rendering"), &dialog);
     disableGpuToggle->setChecked(disableGpu_);
     layout->addWidget(disableGpuToggle);
 

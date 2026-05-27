@@ -16,6 +16,12 @@ sudo dnf install \
   qt6-qtsvg-devel
 ```
 
+To build Fedora RPM packages with `cpack -G RPM`, also install:
+
+```sh
+sudo dnf install rpm-build
+```
+
 Configure and build with Ninja:
 
 ```sh
@@ -46,6 +52,12 @@ sudo apt install \
   libqt6svg6-dev
 ```
 
+To build Ubuntu `.deb` packages with `cpack -G DEB`, also install:
+
+```sh
+sudo apt install dpkg-dev
+```
+
 Configure and build with Ninja:
 
 ```sh
@@ -74,6 +86,12 @@ sudo apt install \
   qt6-base-dev \
   qt6-base-dev-tools \
   libqt6svg6-dev
+```
+
+To build Raspberry Pi OS/Debian `.deb` packages with `cpack -G DEB`, also install:
+
+```sh
+sudo apt install dpkg-dev
 ```
 
 Configure and build with Ninja:
