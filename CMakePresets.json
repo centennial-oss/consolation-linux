@@ -2,19 +2,28 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "ubuntu-2604",
-      "displayName": "Ubuntu 26.04",
+      "name": "ubuntu-26",
+      "displayName": "Ubuntu 26.04 (resolute)",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-ubuntu-2604",
+      "binaryDir": "${sourceDir}/build-ubuntu-26",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
-      "name": "ubuntu-2404",
-      "displayName": "Ubuntu 24.04",
+      "name": "ubuntu-24",
+      "displayName": "Ubuntu 24.04 (noble)",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-ubuntu-2404",
+      "binaryDir": "${sourceDir}/build-ubuntu-24",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "ubuntu-22",
+      "displayName": "Ubuntu 22.04 (jammy)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ubuntu-22",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -24,6 +33,15 @@
       "displayName": "Fedora 42",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-fedora-42",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "fedora-43",
+      "displayName": "Fedora 43",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-fedora-43",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -49,16 +67,24 @@
   ],
   "buildPresets": [
     {
-      "name": "ubuntu-2604",
-      "configurePreset": "ubuntu-2604"
+      "name": "ubuntu-26",
+      "configurePreset": "ubuntu-26"
     },
     {
-      "name": "ubuntu-2404",
-      "configurePreset": "ubuntu-2404"
+      "name": "ubuntu-24",
+      "configurePreset": "ubuntu-24"
+    },
+    {
+      "name": "ubuntu-22",
+      "configurePreset": "ubuntu-22"
     },
     {
       "name": "fedora-42",
       "configurePreset": "fedora-42"
+    },
+    {
+      "name": "fedora-43",
+      "configurePreset": "fedora-43"
     },
     {
       "name": "fedora-44",
@@ -71,15 +97,22 @@
   ],
   "testPresets": [
     {
-      "name": "ubuntu-2604",
-      "configurePreset": "ubuntu-2604",
+      "name": "ubuntu-26",
+      "configurePreset": "ubuntu-26",
       "output": {
         "outputOnFailure": true
       }
     },
     {
-      "name": "ubuntu-2404",
-      "configurePreset": "ubuntu-2404",
+      "name": "ubuntu-24",
+      "configurePreset": "ubuntu-24",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ubuntu-22",
+      "configurePreset": "ubuntu-22",
       "output": {
         "outputOnFailure": true
       }
@@ -87,6 +120,13 @@
     {
       "name": "fedora-42",
       "configurePreset": "fedora-42",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fedora-43",
+      "configurePreset": "fedora-43",
       "output": {
         "outputOnFailure": true
       }
