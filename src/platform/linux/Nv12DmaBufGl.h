@@ -53,6 +53,7 @@ private:
     void *eglDisplay_ = nullptr;
     unsigned int programId_ = 0;
     unsigned int vboId_ = 0;
+    unsigned int vaoId_ = 0;
     int yUniform_ = -1;
     int uvUniform_ = -1;
     int activeSlot_ = -1;

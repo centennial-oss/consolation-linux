@@ -44,6 +44,14 @@ PFNGLGEN_TEXTURESPROC glGenTexturesFn = nullptr;
 PFNGLDELETE_TEXTURESPROC glDeleteTexturesFn = nullptr;
 PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOESFn = nullptr;
 
+using PFNGLGENVERTEXARRAYSPROC = void (*)(int, unsigned int *);
+using PFNGLBINDVERTEXARRAYPROC = void (*)(unsigned int);
+using PFNGLDELETEVERTEXARRAYSPROC = void (*)(int, const unsigned int *);
+
+PFNGLGENVERTEXARRAYSPROC glGenVertexArraysFn = nullptr;
+PFNGLBINDVERTEXARRAYPROC glBindVertexArrayFn = nullptr;
+PFNGLDELETEVERTEXARRAYSPROC glDeleteVertexArraysFn = nullptr;
+
 struct ShaderSources {
     const char *vertex = nullptr;
     const char *fragment = nullptr;
@@ -285,6 +293,24 @@ bool I420DmaBufGl::resolveExtensions()
     glGenTexturesFn = reinterpret_cast<PFNGLGEN_TEXTURESPROC>(eglGetProcAddress("glGenTextures"));
     glDeleteTexturesFn = reinterpret_cast<PFNGLDELETE_TEXTURESPROC>(eglGetProcAddress("glDeleteTextures"));
 
+    // VAO support is optional — resolve without failing if unavailable (ES2, older GL).
+    glGenVertexArraysFn = reinterpret_cast<PFNGLGENVERTEXARRAYSPROC>(eglGetProcAddress("glGenVertexArrays"));
+    if (!glGenVertexArraysFn) {
+        glGenVertexArraysFn =
+            reinterpret_cast<PFNGLGENVERTEXARRAYSPROC>(eglGetProcAddress("glGenVertexArraysOES"));
+    }
+    glBindVertexArrayFn = reinterpret_cast<PFNGLBINDVERTEXARRAYPROC>(eglGetProcAddress("glBindVertexArray"));
+    if (!glBindVertexArrayFn) {
+        glBindVertexArrayFn =
+            reinterpret_cast<PFNGLBINDVERTEXARRAYPROC>(eglGetProcAddress("glBindVertexArrayOES"));
+    }
+    glDeleteVertexArraysFn =
+        reinterpret_cast<PFNGLDELETEVERTEXARRAYSPROC>(eglGetProcAddress("glDeleteVertexArrays"));
+    if (!glDeleteVertexArraysFn) {
+        glDeleteVertexArraysFn =
+            reinterpret_cast<PFNGLDELETEVERTEXARRAYSPROC>(eglGetProcAddress("glDeleteVertexArraysOES"));
+    }
+
     return eglCreateImageKHRFn != nullptr && eglDestroyImageKHRFn != nullptr &&
         glEGLImageTargetTexture2DOESFn != nullptr && glBindTextureFn != nullptr && glGenTexturesFn != nullptr &&
         glDeleteTexturesFn != nullptr;
@@ -345,6 +371,18 @@ bool I420DmaBufGl::initialize()
     uUniform_ = glGetUniformLocation(programId_, "uTex");
     vUniform_ = glGetUniformLocation(programId_, "vTex");
 
+    if (programId_ == 0 || yUniform_ < 0 || uUniform_ < 0 || vUniform_ < 0) {
+        lastInitFailure_ = QStringLiteral("I420 shader program setup failed");
+        return false;
+    }
+
+    // Texture-unit sampler assignments never change — set them once here so draw() skips them.
+    glUseProgram(programId_);
+    glUniform1i(yUniform_, 0);
+    glUniform1i(uUniform_, 1);
+    glUniform1i(vUniform_, 2);
+    glUseProgram(0);
+
     static constexpr float quadVertices[] = {
         -1.0F, -1.0F, 0.0F, 1.0F,
         1.0F, -1.0F, 1.0F, 1.0F,
@@ -356,9 +394,20 @@ bool I420DmaBufGl::initialize()
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    if (programId_ == 0 || yUniform_ < 0 || uUniform_ < 0 || vUniform_ < 0) {
-        lastInitFailure_ = QStringLiteral("I420 shader program setup failed");
-        return false;
+    // Create a VAO to record the VBO binding and attrib layout once, eliminating per-frame redundancy.
+    if (glGenVertexArraysFn && glBindVertexArrayFn && glDeleteVertexArraysFn) {
+        glGenVertexArraysFn(1, &vaoId_);
+        glBindVertexArrayFn(vaoId_);
+        glBindBuffer(GL_ARRAY_BUFFER, vboId_);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            0, 2, GL_FLOAT, GL_FALSE, static_cast<int>(4 * sizeof(float)), reinterpret_cast<void *>(0));
+        glVertexAttribPointer(
+            1, 2, GL_FLOAT, GL_FALSE, static_cast<int>(4 * sizeof(float)),
+            reinterpret_cast<void *>(static_cast<int>(2 * sizeof(float))));
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArrayFn(0);
     }
 
     available_ = true;
@@ -369,6 +418,10 @@ void I420DmaBufGl::shutdown()
 {
     releaseAllSlots();
     releaseFrame();
+    if (vaoId_ != 0 && glDeleteVertexArraysFn) {
+        glDeleteVertexArraysFn(1, &vaoId_);
+        vaoId_ = 0;
+    }
     if (vboId_ != 0) {
         glDeleteBuffers(1, &vboId_);
         vboId_ = 0;
@@ -540,10 +593,8 @@ void I420DmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const 
     }
     glViewport(viewportX, viewportY, viewportW, viewportH);
 
+    // Sampler uniforms (yTex=0, uTex=1, vTex=2) were set once at initialize() and never change.
     glUseProgram(programId_);
-    glUniform1i(yUniform_, 0);
-    glUniform1i(uUniform_, 1);
-    glUniform1i(vUniform_, 2);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTextureFn(GL_TEXTURE_2D, slot.yTextureId);
@@ -553,21 +604,25 @@ void I420DmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const 
     glBindTextureFn(GL_TEXTURE_2D, slot.vTextureId);
     glActiveTexture(GL_TEXTURE0);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vboId_);
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, static_cast<int>(4 * sizeof(float)), reinterpret_cast<void *>(0));
-    glVertexAttribPointer(
-        1,
-        2,
-        GL_FLOAT,
-        GL_FALSE,
-        static_cast<int>(4 * sizeof(float)),
-        reinterpret_cast<void *>(static_cast<int>(2 * sizeof(float))));
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
+    if (vaoId_ != 0 && glBindVertexArrayFn) {
+        // VAO records VBO binding and attrib layout — no per-frame redundant setup.
+        glBindVertexArrayFn(vaoId_);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArrayFn(0);
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, vboId_);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            0, 2, GL_FLOAT, GL_FALSE, static_cast<int>(4 * sizeof(float)), reinterpret_cast<void *>(0));
+        glVertexAttribPointer(
+            1, 2, GL_FLOAT, GL_FALSE, static_cast<int>(4 * sizeof(float)),
+            reinterpret_cast<void *>(static_cast<int>(2 * sizeof(float))));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDisableVertexAttribArray(0);
+        glDisableVertexAttribArray(1);
+    }
 
     glBindTextureFn(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE2);

@@ -59,6 +59,7 @@ private:
     void *eglDisplay_ = nullptr;
     unsigned int programId_ = 0;
     unsigned int vboId_ = 0;
+    unsigned int vaoId_ = 0;
     int frameUniform_ = -1;
     int pixelWidthUniform_ = -1;
     int byteWidthUniform_ = -1;
@@ -69,6 +70,11 @@ private:
     bool boundFlipVertical_ = false;
     float boundPixelWidth_ = 0.0F;
     float boundByteWidth_ = 0.0F;
+    // Dirty-flag cache: tracks last values sent to per-slot uniforms to skip redundant glUniform calls.
+    float lastSentPixelWidth_ = -1.0F;
+    float lastSentByteWidth_ = -1.0F;
+    int lastSentBgr_ = -1;
+    int lastSentFlipY_ = -1;
     capture::DmaBufFrameHandle boundFrame_;
     std::array<SlotBinding, maxBufferSlots> slots_ {};
 };
