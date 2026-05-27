@@ -28,6 +28,8 @@ sudo apt update
 packages=(
   build-essential
   cmake
+  libegl-dev
+  libgl-dev
   libjpeg-turbo8-dev
   libpipewire-0.3-dev
   libxkbcommon-dev

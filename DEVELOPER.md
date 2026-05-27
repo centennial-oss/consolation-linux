@@ -30,6 +30,8 @@ sudo dnf install \
   cmake \
   gcc-c++ \
   libjpeg-turbo-devel \
+  mesa-libEGL-devel \
+  mesa-libGL-devel \
   ninja-build \
   pipewire-devel \
   qt6-qtbase-devel \
@@ -65,6 +67,8 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
+  libegl-dev \
+  libgl-dev \
   libjpeg-turbo8-dev \
   libpipewire-0.3-dev \
   libxkbcommon-dev \
@@ -104,6 +108,8 @@ sudo apt update
 sudo apt install \
   build-essential \
   cmake \
+  libegl-dev \
+  libgl-dev \
   libjpeg-turbo8-dev \
   libpipewire-0.3-dev \
   libxkbcommon-dev \

@@ -27,6 +27,8 @@ packages=(
   cmake
   gcc-c++
   libjpeg-turbo-devel
+  mesa-libEGL-devel
+  mesa-libGL-devel
   ninja-build
   pipewire-devel
   qt6-qtbase-devel
