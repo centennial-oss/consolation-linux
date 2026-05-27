@@ -384,6 +384,7 @@ public:
 
     void releaseDmaGlState()
     {
+        finishDmaBufReadIfActive();
         dmaFrame_.reset();
         clearBoundDmaIdentity();
         if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
@@ -637,6 +638,19 @@ private:
         boundDmaLayout_ = capture::DmaBufLayout::Unknown;
     }
 
+    [[nodiscard]] bool beginDmaBufReadForBind(const capture::DmaBufFrame &frame, const bool needsBind)
+    {
+        if (!needsBind) {
+            return true;
+        }
+        return platform::linux::dmaBufBeginRead(dmaSyncFd_, frame.dmaFd);
+    }
+
+    void finishDmaBufReadIfActive()
+    {
+        platform::linux::dmaBufEndRead(dmaSyncFd_);
+    }
+
     // Return the V4L2 buffer to the driver as soon as the GPU has sampled it (see glFinish below).
     void completeDmaPresent(const int bufferIndex)
     {
@@ -645,6 +659,7 @@ private:
                 gl->glFinish();
             }
         }
+        finishDmaBufReadIfActive();
 
         dmaFrame_.reset();
         clearBoundDmaIdentity();
@@ -687,94 +702,74 @@ private:
         }
     }
 
+    template <typename BindFn, typename DrawFn>
+    bool paintDmaLayout(const int rendererIndex, const bool glAvailable, BindFn &&bindFn, DrawFn &&drawFn)
+    {
+        if (!glAvailable) {
+            return false;
+        }
+
+        const auto &frame = *dmaFrame_;
+        const auto needsBind = !isBoundToDmaFrame(frame);
+
+        if (needsBind) {
+            if (!beginDmaBufReadForBind(frame, true)) {
+                return false;
+            }
+            if (!bindFn()) {
+                finishDmaBufReadIfActive();
+                clearBoundDmaIdentity();
+                return false;
+            }
+            setBoundDmaIdentity(frame);
+        }
+
+        activeGlRenderer_ = rendererIndex;
+        drawFn();
+        reportFramePresented();
+        notifyFirstFramePainted();
+        completeDmaPresent(frame.bufferIndex);
+        return true;
+    }
+
     bool tryPaintDmaFrame()
     {
         if (!dmaFrame_) {
             return false;
         }
 
-        platform::linux::DmaBufReadGuard dmaSync(dmaFrame_->dmaFd);
-        if (!dmaSync.started()) {
-            return false;
-        }
-
         const auto &frame = *dmaFrame_;
-        const auto needsBind = !isBoundToDmaFrame(frame);
         const auto dpr = dpr_;
         if (frame.layout == capture::DmaBufLayout::Nv12) {
-            if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
-                return false;
-            }
-            if (needsBind) {
-                if (!nv12Gl_->bindFrame(dmaFrame_)) {
-                    clearBoundDmaIdentity();
-                    return false;
-                }
-                setBoundDmaIdentity(frame);
-            }
-            activeGlRenderer_ = 0;
-            nv12Gl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            completeDmaPresent(frame.bufferIndex);
-            return true;
+            return paintDmaLayout(
+                0,
+                nv12Gl_ && nv12Gl_->isAvailable(),
+                [&]() { return nv12Gl_->bindFrame(dmaFrame_); },
+                [&]() { nv12Gl_->draw(size(), targetRect_, dpr); });
         }
 
         if (frame.layout == capture::DmaBufLayout::Rgb888 || frame.layout == capture::DmaBufLayout::Bgr888) {
-            if (!rgbGl_ || !rgbGl_->isAvailable()) {
-                return false;
-            }
-            if (needsBind) {
-                if (!rgbGl_->bindFrame(dmaFrame_)) {
-                    clearBoundDmaIdentity();
-                    return false;
-                }
-                setBoundDmaIdentity(frame);
-            }
-            activeGlRenderer_ = 1;
-            rgbGl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            completeDmaPresent(frame.bufferIndex);
-            return true;
+            return paintDmaLayout(
+                1,
+                rgbGl_ && rgbGl_->isAvailable(),
+                [&]() { return rgbGl_->bindFrame(dmaFrame_); },
+                [&]() { rgbGl_->draw(size(), targetRect_, dpr); });
         }
 
         if (frame.layout == capture::DmaBufLayout::Yuyv422) {
-            if (!yuyvGl_ || !yuyvGl_->isAvailable()) {
-                return false;
-            }
-            if (needsBind) {
-                if (!yuyvGl_->bindFrame(dmaFrame_)) {
-                    clearBoundDmaIdentity();
-                    return false;
-                }
-                setBoundDmaIdentity(frame);
-            }
-            activeGlRenderer_ = 2;
-            yuyvGl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            completeDmaPresent(frame.bufferIndex);
-            return true;
+            return paintDmaLayout(
+                2,
+                yuyvGl_ && yuyvGl_->isAvailable(),
+                [&]() { return yuyvGl_->bindFrame(dmaFrame_); },
+                [&]() { yuyvGl_->draw(size(), targetRect_, dpr); });
         }
 
         if (frame.layout == capture::DmaBufLayout::I420 || frame.layout == capture::DmaBufLayout::Yv12) {
-            if (!i420Gl_ || !i420Gl_->isAvailable()) {
-                return false;
-            }
-            if (needsBind) {
-                if (!i420Gl_->bindFrame(dmaFrame_)) {
-                    clearBoundDmaIdentity();
-                    return false;
-                }
-                setBoundDmaIdentity(frame);
-            }
-            activeGlRenderer_ = 3;
-            i420Gl_->draw(size(), targetRect_, dpr);
-            reportFramePresented();
-            notifyFirstFramePainted();
-            completeDmaPresent(frame.bufferIndex);
-            return true;
+            return paintDmaLayout(
+                3,
+                i420Gl_ && i420Gl_->isAvailable(),
+                [&]() { return i420Gl_->bindFrame(dmaFrame_); },
+                [&]() { i420Gl_->draw(size(), targetRect_, dpr); });
         }
 
         return false;
@@ -798,6 +793,7 @@ private:
     CpuFrameScaleCache cpuScale_;
     int boundDmaBufferIndex_ = -1;
     int boundDmaFd_ = -1;
+    int dmaSyncFd_ = -1;
     capture::DmaBufLayout boundDmaLayout_ = capture::DmaBufLayout::Unknown;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;

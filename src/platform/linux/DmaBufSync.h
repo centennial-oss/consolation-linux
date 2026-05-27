@@ -28,6 +28,11 @@ inline std::atomic<DmaBufSyncSupport> &dmaBufSyncSupport()
     return support;
 }
 
+[[nodiscard]] inline bool dmaBufSyncIsOptional()
+{
+    return dmaBufSyncSupport().load(std::memory_order_relaxed) == DmaBufSyncSupport::Unsupported;
+}
+
 inline bool dmaBufSync(const int fd, const unsigned int flags)
 {
     if (fd < 0) {
@@ -65,7 +70,33 @@ inline bool dmaBufSyncEndRead(const int fd)
     return dmaBufSync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
 }
 
-// Ensures END is issued when START succeeded.
+// Call before EGL/GL first reads a dma-buf (e.g. on import). Pair with dmaBufSyncEndRead after GPU work.
+[[nodiscard]] inline bool dmaBufBeginRead(int &activeFd, const int fd)
+{
+    activeFd = -1;
+    if (fd < 0) {
+        return false;
+    }
+    if (!dmaBufSyncStartRead(fd)) {
+        return false;
+    }
+    if (!dmaBufSyncIsOptional()) {
+        activeFd = fd;
+    }
+    return true;
+}
+
+inline void dmaBufEndRead(int &activeFd)
+{
+    if (activeFd < 0) {
+        return;
+    }
+    dmaBufSyncEndRead(activeFd);
+    activeFd = -1;
+}
+
+// Ensures END is issued when START succeeded. Prefer dmaBufBeginRead/dmaBufEndRead when END must
+// follow glFinish rather than scope exit.
 class DmaBufReadGuard final {
 public:
     explicit DmaBufReadGuard(const int fd)
@@ -73,14 +104,15 @@ public:
     {
         if (fd_ >= 0) {
             started_ = dmaBufSyncStartRead(fd_);
+            if (started_ && !dmaBufSyncIsOptional()) {
+                activeFd_ = fd_;
+            }
         }
     }
 
     ~DmaBufReadGuard()
     {
-        if (started_) {
-            dmaBufSyncEndRead(fd_);
-        }
+        dmaBufEndRead(activeFd_);
     }
 
     DmaBufReadGuard(const DmaBufReadGuard &) = delete;
@@ -93,6 +125,7 @@ public:
 
 private:
     int fd_ = -1;
+    int activeFd_ = -1;
     bool started_ = false;
 };
 
