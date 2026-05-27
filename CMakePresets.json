@@ -2,10 +2,28 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "ubuntu-2604",
+      "displayName": "Ubuntu 26.04",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ubuntu-2604",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
       "name": "ubuntu-2404",
       "displayName": "Ubuntu 24.04",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-ubuntu-2404",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "fedora-42",
+      "displayName": "Fedora 42",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-fedora-42",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -31,8 +49,16 @@
   ],
   "buildPresets": [
     {
+      "name": "ubuntu-2604",
+      "configurePreset": "ubuntu-2604"
+    },
+    {
       "name": "ubuntu-2404",
       "configurePreset": "ubuntu-2404"
+    },
+    {
+      "name": "fedora-42",
+      "configurePreset": "fedora-42"
     },
     {
       "name": "fedora-44",
@@ -45,8 +71,22 @@
   ],
   "testPresets": [
     {
+      "name": "ubuntu-2604",
+      "configurePreset": "ubuntu-2604",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "ubuntu-2404",
       "configurePreset": "ubuntu-2404",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fedora-42",
+      "configurePreset": "fedora-42",
       "output": {
         "outputOnFailure": true
       }

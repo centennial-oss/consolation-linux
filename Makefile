@@ -19,24 +19,44 @@ SET_BUILD_INFO_SCRIPT := scripts/set-build-info.sh
 	build-linux \
 	test-linux \
 	run-headless \
+	build-fedora-42-binary \
+	build-fedora-42 \
+	build-fedora-42-amd64 \
+	build-fedora-42-arm64 \
 	build-fedora-44-binary \
 	build-fedora-44 \
 	build-fedora-44-amd64 \
 	build-fedora-44-arm64 \
+	build-ubuntu-26-04-binary \
+	build-ubuntu-26-04 \
+	build-ubuntu-26-04-amd64 \
+	build-ubuntu-26-04-arm64 \
 	build-ubuntu-24-04-binary \
 	build-ubuntu-24-04 \
 	build-ubuntu-24-04-amd64 \
 	build-ubuntu-24-04-arm64 \
-	build-linux-ubuntu-2404 \
-	test-linux-ubuntu-2404 \
+	build-linux-ubuntu-26-04 \
+	build-linux-ubuntu-24-04 \
+	test-linux-ubuntu-24-04 \
+	test-linux-ubuntu-26-04 \
+	build-linux-fedora-42 \
+	test-linux-fedora-42 \
 	build-linux-fedora-44 \
 	test-linux-fedora-44 \
 	build-linux-rpi-os-trixie \
 	test-linux-rpi-os-trixie
 
+build-fedora-42-binary:
+	cmake --preset fedora-42
+	cmake --build --preset fedora-42
+
 build-fedora-44-binary:
 	cmake --preset fedora-44
 	cmake --build --preset fedora-44
+
+build-ubuntu-26-04-binary:
+	cmake --preset ubuntu-2604
+	cmake --build --preset ubuntu-2604
 
 build-ubuntu-24-04-binary:
 	cmake --preset ubuntu-2404
@@ -67,6 +87,20 @@ clear-version-info:
 
 build-fedora-44: build-fedora-44-amd64 build-fedora-44-arm64
 
+build-fedora-42: build-fedora-42-amd64 build-fedora-42-arm64
+
+build-fedora-42-amd64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
+	$(MAKE) build-fedora-42-binary; \
+	cd build-fedora-42 && cpack -G RPM -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_RELEASE=1 -D CPACK_RPM_PACKAGE_ARCHITECTURE=x86_64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-42-x86_64
+
+build-fedora-42-arm64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=aarch64; \
+	$(MAKE) build-fedora-42-binary; \
+	cd build-fedora-42 && cpack -G RPM -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_RELEASE=1 -D CPACK_RPM_PACKAGE_ARCHITECTURE=aarch64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-42-aarch64
+
 build-fedora-44-amd64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
@@ -81,6 +115,20 @@ build-fedora-44-arm64:
 
 build-ubuntu-24-04: build-ubuntu-24-04-amd64 build-ubuntu-24-04-arm64
 
+build-ubuntu-26-04: build-ubuntu-26-04-amd64 build-ubuntu-26-04-arm64
+
+build-ubuntu-26-04-amd64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
+	$(MAKE) build-ubuntu-26-04-binary; \
+	cd build-ubuntu-2604 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-26.04-amd64
+
+build-ubuntu-26-04-arm64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=arm64; \
+	$(MAKE) build-ubuntu-26-04-binary; \
+	cd build-ubuntu-2604 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-26.04-arm64
+
 build-ubuntu-24-04-amd64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
@@ -93,10 +141,20 @@ build-ubuntu-24-04-arm64:
 	$(MAKE) build-ubuntu-24-04-binary; \
 	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-arm64
 
-build-linux-ubuntu-2404: build-ubuntu-24-04-binary
+build-linux-ubuntu-26-04: build-ubuntu-26-04-binary
 
-test-linux-ubuntu-2404: build-linux-ubuntu-2404
+build-linux-ubuntu-24-04: build-ubuntu-24-04-binary
+
+test-linux-ubuntu-26-04: build-linux-ubuntu-26-04
+	ctest --preset ubuntu-2604
+
+test-linux-ubuntu-24-04: build-linux-ubuntu-24-04
 	ctest --preset ubuntu-2404
+
+build-linux-fedora-42: build-fedora-42-binary
+
+test-linux-fedora-42: build-linux-fedora-42
+	ctest --preset fedora-42
 
 build-linux-fedora-44: build-fedora-44-binary
 
