@@ -71,13 +71,13 @@ build-fedora-44-amd64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
 	$(MAKE) build-fedora-44-binary; \
-	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=x86_64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-x86_64
+	cd build-fedora-44 && cpack -G RPM -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_RELEASE=1 -D CPACK_RPM_PACKAGE_ARCHITECTURE=x86_64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-x86_64
 
 build-fedora-44-arm64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=aarch64; \
 	$(MAKE) build-fedora-44-binary; \
-	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=aarch64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-aarch64
+	cd build-fedora-44 && cpack -G RPM -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_RPM_PACKAGE_RELEASE=1 -D CPACK_RPM_PACKAGE_ARCHITECTURE=aarch64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-aarch64
 
 build-ubuntu-24-04: build-ubuntu-24-04-amd64 build-ubuntu-24-04-arm64
 
@@ -85,13 +85,13 @@ build-ubuntu-24-04-amd64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
 	$(MAKE) build-ubuntu-24-04-binary; \
-	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-amd64
+	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-amd64
 
 build-ubuntu-24-04-arm64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
 	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=arm64; \
 	$(MAKE) build-ubuntu-24-04-binary; \
-	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-arm64
+	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-arm64
 
 build-linux-ubuntu-2404: build-ubuntu-24-04-binary
 
