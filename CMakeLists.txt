@@ -160,9 +160,18 @@ install(FILES packaging/linux/org.centennialoss.consolation.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
 )
 
-install(FILES assets/icons/power.svg
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
-    RENAME org.centennialoss.consolation.svg
+set(CONSOLATION_ICON_NAME org.centennialoss.consolation)
+foreach(CONSOLATION_ICON_SIZE IN ITEMS 48 128)
+    install(
+        FILES assets/icons/app-icon.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${CONSOLATION_ICON_SIZE}x${CONSOLATION_ICON_SIZE}/apps
+        RENAME ${CONSOLATION_ICON_NAME}.png
+    )
+endforeach()
+install(
+    FILES assets/icons/app-icon-large.png
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
+    RENAME ${CONSOLATION_ICON_NAME}.png
 )
 
 set(CPACK_PACKAGE_NAME "consolation")
