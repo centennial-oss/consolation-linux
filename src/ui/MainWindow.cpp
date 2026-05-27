@@ -305,6 +305,7 @@ public:
         setSurfaceType(QSurface::OpenGLSurface);
         QSurfaceFormat fmt;
         fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+        fmt.setSwapInterval(0);
         fmt.setDepthBufferSize(0);
         fmt.setStencilBufferSize(0);
         setFormat(fmt);
@@ -562,61 +563,15 @@ private:
     QRect cachedTargetRect_;
 };
 
-class GpuFrameRenderer final : public QWidget, public FrameRenderer {
+class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
 public:
     using DmaGlFailedHandler = std::function<void()>;
     using DmaCpuFallbackHandler = std::function<void(capture::DmaBufFrameHandle)>;
 
     explicit GpuFrameRenderer(QWidget *parent = nullptr)
-        : QWidget(parent)
+        : QOpenGLWidget(parent)
     {
         setAutoFillBackground(false);
-
-        renderWindow_ = new GpuRenderWindow();
-        renderContainer_ = QWidget::createWindowContainer(renderWindow_, this);
-        renderContainer_->setGeometry(rect());
-        renderContainer_->show();
-        renderContainer_->lower();
-
-        renderThread_ = new VideoRenderThread(renderWindow_, this);
-
-        connect(renderWindow_, &GpuRenderWindow::windowExposed, this, [this]() {
-            if (!renderThread_->isRunning()) {
-                renderThread_->notifyResize(renderWindow_->size(),
-                                            static_cast<float>(renderWindow_->devicePixelRatio()));
-                renderThread_->start();
-            }
-        });
-
-        connect(renderWindow_, &GpuRenderWindow::windowResized, this, [this](QSize size, float dpr) {
-            renderThread_->notifyResize(size, dpr);
-        });
-
-        connect(renderThread_, &VideoRenderThread::firstFramePainted, this, [this]() {
-            if (!firstFramePainted_ && firstFramePaintedHandler_) {
-                firstFramePainted_ = true;
-                firstFramePaintedHandler_();
-            }
-        });
-
-        connect(renderThread_, &VideoRenderThread::framePresented, this, [this](const qint64 latencyNs) {
-            if (framePresentedHandler_) {
-                framePresentedHandler_(latencyNs);
-            }
-        });
-
-        connect(renderThread_, &VideoRenderThread::dmaCpuFallback, this,
-                [this](capture::DmaBufFrameHandle frame) {
-                    if (dmaCpuFallbackHandler_) {
-                        dmaCpuFallbackHandler_(std::move(frame));
-                    }
-                });
-    }
-
-    ~GpuFrameRenderer() override
-    {
-        renderThread_->requestStop();
-        renderThread_->wait();
     }
 
     void setDmaGlFailedHandler(DmaGlFailedHandler handler)
@@ -629,17 +584,57 @@ public:
         dmaCpuFallbackHandler_ = std::move(handler);
     }
 
-    // Thread-safe: enqueue a DMA frame directly on the render thread (no UI event loop).
-    void submitDmaFrame(capture::DmaBufFrameHandle frame)
-    {
-        renderThread_->enqueueFrame(std::move(frame));
-    }
-
     void releaseDmaGlState()
     {
-        if (renderThread_->isRunning()) {
-            renderThread_->requestStop();
-            renderThread_->wait();
+        dmaFrame_.reset();
+        boundDmaFrame_.reset();
+        if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
+            return;
+        }
+
+        if (context() != nullptr && context()->isValid()) {
+            makeCurrent();
+            if (nv12Gl_.has_value()) {
+                nv12Gl_->releaseAllSlots();
+                nv12Gl_->releaseFrame();
+            }
+            if (rgbGl_.has_value()) {
+                rgbGl_->releaseAllSlots();
+                rgbGl_->releaseFrame();
+            }
+            if (yuyvGl_.has_value()) {
+                yuyvGl_->releaseAllSlots();
+                yuyvGl_->releaseFrame();
+            }
+            if (i420Gl_.has_value()) {
+                i420Gl_->releaseAllSlots();
+                i420Gl_->releaseFrame();
+            }
+            doneCurrent();
+        }
+    }
+
+    ~GpuFrameRenderer() override
+    {
+        if (context() != nullptr && context()->isValid()) {
+            makeCurrent();
+            if (nv12Gl_.has_value()) {
+                nv12Gl_->shutdown();
+                nv12Gl_.reset();
+            }
+            if (rgbGl_.has_value()) {
+                rgbGl_->shutdown();
+                rgbGl_.reset();
+            }
+            if (yuyvGl_.has_value()) {
+                yuyvGl_->shutdown();
+                yuyvGl_.reset();
+            }
+            if (i420Gl_.has_value()) {
+                i420Gl_->shutdown();
+                i420Gl_.reset();
+            }
+            doneCurrent();
         }
     }
 
@@ -655,81 +650,272 @@ public:
 
     void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
     {
-        if (renderContainer_) renderContainer_->hide();
+        dmaFrame_.reset();
+        boundDmaFrame_.reset();
+        if (nv12Gl_.has_value()) {
+            nv12Gl_->releaseFrame();
+        }
+        if (rgbGl_.has_value()) {
+            rgbGl_->releaseFrame();
+        }
+        if (yuyvGl_.has_value()) {
+            yuyvGl_->releaseFrame();
+        }
+        if (i420Gl_.has_value()) {
+            i420Gl_->releaseFrame();
+        }
         displayCapturedAtNs_ = capturedAtNs;
-        cpuFrame_ = std::move(frame);
-        updateCpuTargetRect();
+        frame_ = std::move(frame);
+        updateTargetRect();
         repaint();
     }
 
     void setDmaFrame(capture::DmaBufFrameHandle frame) override
     {
-        cpuFrame_.reset();
-        if (renderContainer_) renderContainer_->show();
-        submitDmaFrame(std::move(frame));
+        frame_.reset();
+        boundDmaFrame_.reset();
+        displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
+        dmaFrame_ = std::move(frame);
+        updateTargetRect();
+        repaint();
     }
 
     int takePaintCount() override
     {
-        return renderThread_->takePaintCount() + std::exchange(cpuPaintCount_, 0);
+        const auto count = paintCount_;
+        paintCount_ = 0;
+        return count;
     }
 
 protected:
-    void resizeEvent(QResizeEvent *event) override
+    void initializeGL() override
     {
-        QWidget::resizeEvent(event);
-        if (renderContainer_) {
-            renderContainer_->setGeometry(rect());
+        nv12Gl_.emplace();
+        if (!nv12Gl_->initialize()) {
+            const auto reason = nv12Gl_->lastInitFailure();
+            nv12Gl_.reset();
+            std::cout << "[MainWindow capture] NV12 DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; NV12 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
         }
-        updateCpuTargetRect();
+
+        rgbGl_.emplace();
+        if (!rgbGl_->initialize()) {
+            const auto reason = rgbGl_->lastInitFailure();
+            rgbGl_.reset();
+            std::cout << "[MainWindow capture] RGB/BGR DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; RGB24/BGR24 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+
+        yuyvGl_.emplace();
+        if (!yuyvGl_->initialize()) {
+            const auto reason = yuyvGl_->lastInitFailure();
+            yuyvGl_.reset();
+            std::cout << "[MainWindow capture] YUYV DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; YUYV/YUY2 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+
+        i420Gl_.emplace();
+        if (!i420Gl_->initialize()) {
+            const auto reason = i420Gl_->lastInitFailure();
+            i420Gl_.reset();
+            std::cout << "[MainWindow capture] I420/YV12 DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; YU12/I420/YV12 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
     }
 
-    void paintEvent(QPaintEvent *event) override
+    void paintGL() override
     {
-        Q_UNUSED(event);
-        if (!cpuFrame_ || cpuFrame_->isNull()) return;
+        ++paintCount_;
+        if (dmaFrame_) {
+            if (tryPaintDmaFrame()) {
+                return;
+            }
+            auto failedFrame = std::move(dmaFrame_);
+            if (dmaCpuFallbackHandler_) {
+                dmaCpuFallbackHandler_(std::move(failedFrame));
+            } else {
+                failedFrame.reset();
+            }
+            return;
+        }
 
-        QPainter painter(this);
-        ++cpuPaintCount_;
-        painter.fillRect(rect(), Qt::black);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (cpuTargetRect_.size() == cpuFrame_->size()) {
-            painter.drawImage(cpuTargetRect_.topLeft(), *cpuFrame_);
-        } else {
-            painter.drawImage(cpuTargetRect_, *cpuFrame_);
+        if (frame_ && !frame_->isNull()) {
+            QPainter painter(this);
+            paintCpuFrame(painter);
+            return;
         }
-        reportFramePresented();
-        if (!firstFramePainted_ && firstFramePaintedHandler_) {
-            firstFramePainted_ = true;
-            firstFramePaintedHandler_();
-        }
+
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QOpenGLWidget::resizeEvent(event);
+        updateTargetRect();
     }
 
 private:
-    void updateCpuTargetRect()
+    void paintCpuFrame(QPainter &painter)
     {
-        if (!cpuFrame_ || cpuFrame_->isNull()) {
-            cpuTargetRect_ = {};
+        ++paintCount_;
+        painter.fillRect(rect(), Qt::black);
+        if (!frame_ || frame_->isNull()) {
             return;
         }
-        auto targetSize = cpuFrame_->size();
+
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (targetRect_.size() == frame_->size()) {
+            painter.drawImage(targetRect_.topLeft(), *frame_);
+        } else {
+            painter.drawImage(targetRect_, *frame_);
+        }
+        reportFramePresented();
+        notifyFirstFramePainted();
+    }
+
+    void updateTargetRect()
+    {
+        QSize sourceSize;
+        if (dmaFrame_) {
+            sourceSize = QSize(dmaFrame_->width, dmaFrame_->height);
+        } else if (frame_ && !frame_->isNull()) {
+            sourceSize = frame_->size();
+        } else {
+            targetRect_ = {};
+            return;
+        }
+
+        auto targetSize = sourceSize;
         targetSize.scale(size(), Qt::KeepAspectRatio);
-        cpuTargetRect_ = QRect(
+        targetRect_ = QRect(
             QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
             targetSize);
     }
 
-    GpuRenderWindow *renderWindow_ = nullptr;
-    QWidget *renderContainer_ = nullptr;
-    VideoRenderThread *renderThread_ = nullptr;
+    bool tryPaintDmaFrame()
+    {
+        if (!dmaFrame_) {
+            return false;
+        }
 
-    capture::FrameHandle cpuFrame_;
-    QRect cpuTargetRect_;
+        platform::linux::DmaBufReadGuard dmaSync(dmaFrame_->dmaFd);
+        if (!dmaSync.started()) {
+            return false;
+        }
+
+        const auto dpr = static_cast<float>(devicePixelRatioF());
+        if (dmaFrame_->layout == capture::DmaBufLayout::Nv12) {
+            if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!nv12Gl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            nv12Gl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
+            notifyFirstFramePainted();
+            return true;
+        }
+
+        if (dmaFrame_->layout == capture::DmaBufLayout::Rgb888 ||
+            dmaFrame_->layout == capture::DmaBufLayout::Bgr888) {
+            if (!rgbGl_ || !rgbGl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!rgbGl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            rgbGl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
+            notifyFirstFramePainted();
+            return true;
+        }
+
+        if (dmaFrame_->layout == capture::DmaBufLayout::Yuyv422) {
+            if (!yuyvGl_ || !yuyvGl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!yuyvGl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            yuyvGl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
+            notifyFirstFramePainted();
+            return true;
+        }
+
+        if (dmaFrame_->layout == capture::DmaBufLayout::I420 ||
+            dmaFrame_->layout == capture::DmaBufLayout::Yv12) {
+            if (!i420Gl_ || !i420Gl_->isAvailable()) {
+                return false;
+            }
+            if (boundDmaFrame_ != dmaFrame_) {
+                if (!i420Gl_->bindFrame(dmaFrame_)) {
+                    boundDmaFrame_.reset();
+                    return false;
+                }
+                boundDmaFrame_ = dmaFrame_;
+            }
+            i420Gl_->draw(size(), targetRect_, dpr);
+            reportFramePresented();
+            notifyFirstFramePainted();
+            return true;
+        }
+
+        return false;
+    }
+
+    void notifyFirstFramePainted()
+    {
+        if (firstFramePainted_ || !firstFramePaintedHandler_) {
+            return;
+        }
+        firstFramePainted_ = true;
+        firstFramePaintedHandler_();
+    }
+
+    std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
+    std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
+    std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
+    std::optional<platform::linux::I420DmaBufGl> i420Gl_;
+    capture::FrameHandle frame_;
+    capture::DmaBufFrameHandle dmaFrame_;
+    capture::DmaBufFrameHandle boundDmaFrame_;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     std::function<void()> firstFramePaintedHandler_;
+    QRect targetRect_;
     bool firstFramePainted_ = false;
-    int cpuPaintCount_ = 0;
+    int paintCount_ = 0;
 };
 
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
@@ -829,22 +1015,18 @@ public:
 
     void setPendingFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
     {
+        pendingDmaFrame_.reset();
         pendingCapturedAtNs_ = capturedAtNs;
         pendingFrame_ = std::move(frame);
         schedulePresent();
     }
 
-    // Thread-safe: deliver a DMA frame straight to the render thread.
-    void submitDmaFrame(capture::DmaBufFrameHandle frame)
+    void setPendingDmaFrame(capture::DmaBufFrameHandle frame)
     {
-        if (!frame) {
-            return;
-        }
-        if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
-            gpu->submitDmaFrame(std::move(frame));
-            presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
-            uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
-        }
+        pendingFrame_.reset();
+        pendingCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
+        pendingDmaFrame_ = std::move(frame);
+        schedulePresent();
     }
 
     void setDmaGlFailedHandler(GpuFrameRenderer::DmaGlFailedHandler handler)
@@ -893,6 +1075,7 @@ public:
 
     void releasePlaybackFrames()
     {
+        pendingDmaFrame_.reset();
         pendingFrame_.reset();
         if (auto *gpu = dynamic_cast<GpuFrameRenderer *>(renderer_)) {
             gpu->releaseDmaGlState();
@@ -920,6 +1103,13 @@ private:
 
     void schedulePresent()
     {
+        if (pendingDmaFrame_) {
+            renderer_->setDmaFrame(std::move(pendingDmaFrame_));
+            presentDmaCount_.fetch_add(1, std::memory_order_relaxed);
+            uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
         if (!pendingFrame_ || pendingFrame_->isNull()) {
             pendingFrame_.reset();
             return;
@@ -933,6 +1123,8 @@ private:
 
     void positionOverlays()
     {
+        rendererWidget_->lower();
+
         if (overlay_ != nullptr) {
             overlay_->adjustSize();
             const int margin = 14;
@@ -970,6 +1162,7 @@ private:
     GpuFrameRenderer::DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     FrameRenderer::FramePresentedHandler framePresentedHandler_;
     capture::FrameHandle pendingFrame_;
+    capture::DmaBufFrameHandle pendingDmaFrame_;
     qint64 pendingCapturedAtNs_ = 0;
     QPointer<QLabel> startupOverlay_;
     QPointer<QWidget> overlay_;
@@ -1890,37 +2083,18 @@ void MainWindow::startPlayback()
             }
             updateVideoFrame(std::move(frame), capturedAtNs);
         });
-    connect(
-        captureSession_.get(),
-        &capture::CaptureSession::dmaFrameReady,
-        this,
-        [this](capture::DmaBufFrameHandle frame) {
-            if (playbackStopping_.load(std::memory_order_acquire)) {
-                return;
-            }
-            if (!frame) {
-                return;
-            }
-            if (auto *surface = dmaVideoSurface_.load(std::memory_order_acquire)) {
-                surface->submitDmaFrame(std::move(frame));
-                return;
-            }
-            QMetaObject::invokeMethod(
-                this,
-                [this, frame = std::move(frame)]() mutable {
-                    if (playbackStopping_.load(std::memory_order_acquire)) {
-                        return;
-                    }
-                    if (!videoSurface_) {
-                        showPlaybackState({});
-                    }
-                    if (auto *surface = dmaVideoSurface_.load(std::memory_order_acquire)) {
-                        surface->submitDmaFrame(std::move(frame));
-                    }
-                },
-                Qt::QueuedConnection);
-        },
-        Qt::DirectConnection);
+    connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
+        if (playbackStopping_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (!frame) {
+            return;
+        }
+        if (!videoSurface_) {
+            showPlaybackState({});
+        }
+        updateVideoDmaFrame(std::move(frame));
+    });
     connect(captureSession_.get(), &capture::CaptureSession::failed, this, [this](const QString &message) {
         if (playbackStopping_.load(std::memory_order_acquire)) {
             return;
@@ -2023,7 +2197,6 @@ void MainWindow::showStoppingState()
     }
     playbackControls_.clear();
     statsOverlay_.clear();
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     latestTelemetry_ = {};
     cachedStatsOverlayText_.clear();
@@ -2066,7 +2239,6 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     auto *video = new VideoSurface(root);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
-    dmaVideoSurface_.store(video, std::memory_order_release);
     video->setFramePresentedHandler([this](const qint64 latencyNs) { recordPresentLatency(latencyNs); });
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
@@ -2095,7 +2267,6 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     statsOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     statsOverlay_ = statsOverlay;
     video->setOverlay(statsOverlay);
-    updateStatsOverlay();
 
     layout->addWidget(video, 1);
 
@@ -2160,6 +2331,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     video->setControlsOverlay(controls);
     enableMouseTrackingTree(root);
     setCentralWidget(root);
+    updateStatsOverlay();
     if (firstFrame && !firstFrame->isNull()) {
         updateVideoFrame(std::move(firstFrame));
     }
@@ -2180,6 +2352,18 @@ void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 captu
     }
 
     videoSurface_->setPendingFrame(std::move(frame), capturedAtNs);
+}
+
+void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
+{
+    if (playbackStopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!videoSurface_ || !frame) {
+        return;
+    }
+
+    videoSurface_->setPendingDmaFrame(std::move(frame));
 }
 
 void MainWindow::recordPresentLatency(const qint64 latencyNs)
@@ -2388,7 +2572,6 @@ void MainWindow::stopPlayback()
 {
     uninhibitScreenSaver();
     playbackStopping_.store(false, std::memory_order_release);
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     if (audioSession_) {
         audioSession_->stop();
         audioSession_.reset();
@@ -2435,7 +2618,6 @@ void MainWindow::stopPlayback()
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
     statsOverlay_.clear();
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     buildStoppedState();
 }
@@ -2446,7 +2628,6 @@ void MainWindow::stopPlaybackAsync()
         return;
     }
     playbackStopping_.store(true, std::memory_order_release);
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     uninhibitScreenSaver();
     if (playbackControls_) {
         playbackControls_->setEnabled(false);
@@ -2506,7 +2687,6 @@ void MainWindow::stopPlaybackAsync()
         delete thread;
     }
 
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     videoSurface_.clear();
     finishPlaybackStopped();
 }
@@ -2514,7 +2694,6 @@ void MainWindow::stopPlaybackAsync()
 void MainWindow::finishPlaybackStopped()
 {
     playbackStopping_.store(false, std::memory_order_release);
-    dmaVideoSurface_.store(nullptr, std::memory_order_release);
     captureThread_ = nullptr;
     captureSession_.reset();
     buildStoppedState();

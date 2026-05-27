@@ -41,6 +41,7 @@ private:
     void showStoppingState();
     void showPlaybackState(capture::FrameHandle firstFrame = {});
     void updateVideoFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0);
+    void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
     void recordPresentLatency(qint64 latencyNs);
     void updateStatsOverlay();
     void refreshStatsOverlayCache();
@@ -80,7 +81,6 @@ private:
     qint64 presentLagTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
     std::atomic<bool> playbackStopping_{false};
-    std::atomic<VideoSurface *> dmaVideoSurface_{nullptr};
     std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;
     std::unique_ptr<ScreenInhibitor> screenInhibitor_;
