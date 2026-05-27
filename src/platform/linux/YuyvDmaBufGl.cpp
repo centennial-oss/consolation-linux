@@ -519,6 +519,11 @@ void YuyvDmaBufGl::releaseFrame()
     activeSlot_ = -1;
 }
 
+void YuyvDmaBufGl::invalidateSlot(const int bufferIndex)
+{
+    releaseSlot(bufferIndex);
+}
+
 void YuyvDmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const float devicePixelRatio)
 {
     if (!available_ || activeSlot_ < 0 || programId_ == 0 || targetRect.isEmpty()) {

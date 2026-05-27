@@ -572,6 +572,56 @@ private:
         boundDmaLayout_ = capture::DmaBufLayout::Unknown;
     }
 
+    // Return the V4L2 buffer to the driver as soon as the GPU has sampled it (see glFinish below).
+    void completeDmaPresent(const int bufferIndex)
+    {
+        if (context() != nullptr) {
+            if (auto *gl = context()->functions()) {
+                gl->glFinish();
+            }
+        }
+
+        dmaFrame_.reset();
+        clearBoundDmaIdentity();
+
+        switch (activeGlRenderer_) {
+        case 0:
+            if (nv12Gl_) {
+                nv12Gl_->releaseFrame();
+                if (bufferIndex >= 0) {
+                    nv12Gl_->invalidateSlot(bufferIndex);
+                }
+            }
+            break;
+        case 1:
+            if (rgbGl_) {
+                rgbGl_->releaseFrame();
+                if (bufferIndex >= 0) {
+                    rgbGl_->invalidateSlot(bufferIndex);
+                }
+            }
+            break;
+        case 2:
+            if (yuyvGl_) {
+                yuyvGl_->releaseFrame();
+                if (bufferIndex >= 0) {
+                    yuyvGl_->invalidateSlot(bufferIndex);
+                }
+            }
+            break;
+        case 3:
+            if (i420Gl_) {
+                i420Gl_->releaseFrame();
+                if (bufferIndex >= 0) {
+                    i420Gl_->invalidateSlot(bufferIndex);
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
     bool tryPaintDmaFrame()
     {
         if (!dmaFrame_) {
@@ -601,6 +651,7 @@ private:
             nv12Gl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
+            completeDmaPresent(frame.bufferIndex);
             return true;
         }
 
@@ -619,6 +670,7 @@ private:
             rgbGl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
+            completeDmaPresent(frame.bufferIndex);
             return true;
         }
 
@@ -637,6 +689,7 @@ private:
             yuyvGl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
+            completeDmaPresent(frame.bufferIndex);
             return true;
         }
 
@@ -655,6 +708,7 @@ private:
             i420Gl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
+            completeDmaPresent(frame.bufferIndex);
             return true;
         }
 

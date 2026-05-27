@@ -531,6 +531,11 @@ void RgbDmaBufGl::releaseFrame()
     activeSlot_ = -1;
 }
 
+void RgbDmaBufGl::invalidateSlot(const int bufferIndex)
+{
+    releaseSlot(bufferIndex);
+}
+
 void RgbDmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const float devicePixelRatio)
 {
     if (!available_ || activeSlot_ < 0 || programId_ == 0 || targetRect.isEmpty()) {

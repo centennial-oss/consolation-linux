@@ -555,6 +555,11 @@ void I420DmaBufGl::releaseFrame()
     activeSlot_ = -1;
 }
 
+void I420DmaBufGl::invalidateSlot(const int bufferIndex)
+{
+    releaseSlot(bufferIndex);
+}
+
 void I420DmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const float devicePixelRatio)
 {
     if (!available_ || activeSlot_ < 0 || programId_ == 0 || targetRect.isEmpty()) {

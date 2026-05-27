@@ -21,6 +21,7 @@ public:
     [[nodiscard]] bool bindFrame(const capture::DmaBufFrameHandle &frame);
     void releaseFrame();
     void releaseAllSlots();
+    void invalidateSlot(int bufferIndex);
 
     void draw(const QSize &widgetSize, const QRect &targetRect, float devicePixelRatio);
 

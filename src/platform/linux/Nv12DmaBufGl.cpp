@@ -511,6 +511,11 @@ void Nv12DmaBufGl::releaseFrame()
     activeSlot_ = -1;
 }
 
+void Nv12DmaBufGl::invalidateSlot(const int bufferIndex)
+{
+    releaseSlot(bufferIndex);
+}
+
 void Nv12DmaBufGl::draw(const QSize &widgetSize, const QRect &targetRect, const float devicePixelRatio)
 {
     if (!available_ || activeSlot_ < 0 || programId_ == 0 || targetRect.isEmpty()) {
