@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Consolation
+Comment=A no-frills UVC capture viewer for Linux
+Exec=consolation
+Icon=org.centennialoss.consolation
+Terminal=false
+Categories=AudioVideo;Video;
+StartupNotify=true

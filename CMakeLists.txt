@@ -156,6 +156,15 @@ install(TARGETS consolation
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+install(FILES packaging/linux/org.centennialoss.consolation.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+)
+
+install(FILES assets/icons/power.svg
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
+    RENAME org.centennialoss.consolation.svg
+)
+
 set(CPACK_PACKAGE_NAME "consolation")
 set(CPACK_PACKAGE_VENDOR "Centennial OSS Inc.")
 set(CPACK_PACKAGE_CONTACT "Centennial OSS Inc.")
