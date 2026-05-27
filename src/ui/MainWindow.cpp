@@ -19,7 +19,9 @@
 
 #include <QApplication>
 #include <QAction>
+#include <QButtonGroup>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
 #include <QDBusConnection>
@@ -40,6 +42,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaType>
+#include <QMouseEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLWidget>
@@ -48,6 +51,7 @@
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
@@ -75,6 +79,7 @@
 #include <utility>
 #include <unistd.h>
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <set>
 #include <vector>
@@ -237,6 +242,12 @@ public:
         Q_UNUSED(frame);
     }
     virtual int takePaintCount() = 0;
+    virtual void setViewOrientation(int rotationDegrees, bool flipHorizontal, bool flipVertical)
+    {
+        Q_UNUSED(rotationDegrees);
+        Q_UNUSED(flipHorizontal);
+        Q_UNUSED(flipVertical);
+    }
 
 protected:
     void reportFramePresented()
@@ -287,6 +298,14 @@ public:
         return count;
     }
 
+    void setViewOrientation(const int rotationDegrees, const bool flipHorizontal, const bool flipVertical) override
+    {
+        rotationDegrees_ = rotationDegrees;
+        flipHorizontal_ = flipHorizontal;
+        flipVertical_ = flipVertical;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent *event) override
     {
@@ -333,7 +352,13 @@ private:
             return;
         }
 
+        painter.save();
+        painter.translate(rect().center());
+        painter.scale(flipHorizontal_ ? -1.0 : 1.0, flipVertical_ ? -1.0 : 1.0);
+        painter.rotate(static_cast<qreal>(rotationDegrees_));
+        painter.translate(-rect().center());
         cpuScale_.paint(painter, targetRect_, *frame_);
+        painter.restore();
         reportFramePresented();
         notifyFirstFramePainted();
     }
@@ -353,6 +378,9 @@ private:
     std::function<void()> firstFramePaintedHandler_;
     bool firstFramePainted_ = false;
     int paintCount_ = 0;
+    int rotationDegrees_ = 0;
+    bool flipHorizontal_ = false;
+    bool flipVertical_ = false;
 };
 
 class GpuFrameRenderer final : public QOpenGLWidget, public FrameRenderer {
@@ -379,6 +407,14 @@ public:
     void setDmaCpuFallbackHandler(DmaCpuFallbackHandler handler)
     {
         dmaCpuFallbackHandler_ = std::move(handler);
+    }
+
+    void setViewOrientation(const int rotationDegrees, const bool flipHorizontal, const bool flipVertical) override
+    {
+        rotationDegrees_ = rotationDegrees;
+        flipHorizontal_ = flipHorizontal;
+        flipVertical_ = flipVertical;
+        update();
     }
 
     void releaseDmaGlState()
@@ -584,7 +620,13 @@ private:
             return;
         }
 
+        painter.save();
+        painter.translate(rect().center());
+        painter.scale(flipHorizontal_ ? -1.0 : 1.0, flipVertical_ ? -1.0 : 1.0);
+        painter.rotate(static_cast<qreal>(rotationDegrees_));
+        painter.translate(-rect().center());
         cpuScale_.paint(painter, targetRect_, *frame_);
+        painter.restore();
         reportFramePresented();
         notifyFirstFramePainted();
     }
@@ -733,6 +775,9 @@ private:
 
     bool tryPaintDmaFrame()
     {
+        if (rotationDegrees_ != 0 || flipHorizontal_ || flipVertical_) {
+            return false;
+        }
         if (!dmaFrame_) {
             return false;
         }
@@ -804,6 +849,9 @@ private:
     int activeGlRenderer_ = -1; // 0=nv12, 1=rgb, 2=yuyv, 3=i420; -1=none
     bool firstFramePainted_ = false;
     int paintCount_ = 0;
+    int rotationDegrees_ = 0;
+    bool flipHorizontal_ = false;
+    bool flipVertical_ = false;
 };
 
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
@@ -955,6 +1003,23 @@ public:
         positionOverlays();
     }
 
+    void setViewOrientation(const int rotationDegrees, const bool flipHorizontal, const bool flipVertical)
+    {
+        if (renderer_) {
+            renderer_->setViewOrientation(rotationDegrees, flipHorizontal, flipVertical);
+        }
+    }
+
+    void setZoomPercent(const int zoomPercent)
+    {
+        zoomPercent_ = std::clamp(zoomPercent, 0, 100);
+        if (zoomPercent_ == 0) {
+            panX_ = 0.0;
+            panY_ = 0.0;
+        }
+        updateRendererGeometry();
+    }
+
     int takePaintCount()
     {
         return renderer_->takePaintCount();
@@ -981,9 +1046,50 @@ protected:
     void resizeEvent(QResizeEvent *event) override
     {
         QWidget::resizeEvent(event);
-        rendererWidget_->setGeometry(rect());
-        rendererWidget_->lower();
+        updateRendererGeometry();
         positionOverlays();
+    }
+
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (zoomPercent_ > 0 && event->button() == Qt::LeftButton) {
+            dragging_ = true;
+            lastDragPos_ = event->pos();
+            event->accept();
+            return;
+        }
+        QWidget::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (dragging_ && zoomPercent_ > 0) {
+            const auto delta = event->pos() - lastDragPos_;
+            lastDragPos_ = event->pos();
+            const auto scale = 1.0 + static_cast<double>(zoomPercent_) / 100.0;
+            const auto scaledWidth = static_cast<int>(std::round(width() * scale));
+            const auto scaledHeight = static_cast<int>(std::round(height() * scale));
+            const auto maxOffsetX = std::max(0, (scaledWidth - width()) / 2);
+            const auto maxOffsetY = std::max(0, (scaledHeight - height()) / 2);
+            if (maxOffsetX > 0) {
+                panX_ = std::clamp(panX_ + static_cast<double>(delta.x()) / static_cast<double>(maxOffsetX), -1.0, 1.0);
+            }
+            if (maxOffsetY > 0) {
+                panY_ = std::clamp(panY_ + static_cast<double>(delta.y()) / static_cast<double>(maxOffsetY), -1.0, 1.0);
+            }
+            updateRendererGeometry();
+            event->accept();
+            return;
+        }
+        QWidget::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            dragging_ = false;
+        }
+        QWidget::mouseReleaseEvent(event);
     }
 
 private:
@@ -1049,6 +1155,26 @@ private:
         }
     }
 
+    void updateRendererGeometry()
+    {
+        if (!rendererWidget_) {
+            return;
+        }
+        const auto scale = 1.0 + static_cast<double>(zoomPercent_) / 100.0;
+        const auto scaledWidth = static_cast<int>(std::round(width() * scale));
+        const auto scaledHeight = static_cast<int>(std::round(height() * scale));
+        const auto maxOffsetX = std::max(0, (scaledWidth - width()) / 2);
+        const auto maxOffsetY = std::max(0, (scaledHeight - height()) / 2);
+        const auto offsetX = static_cast<int>(std::round(panX_ * maxOffsetX));
+        const auto offsetY = static_cast<int>(std::round(panY_ * maxOffsetY));
+        rendererWidget_->setGeometry(
+            (width() - scaledWidth) / 2 + offsetX,
+            (height() - scaledHeight) / 2 + offsetY,
+            scaledWidth,
+            scaledHeight);
+        rendererWidget_->lower();
+    }
+
     FrameRenderer *renderer_ = nullptr;
     QWidget *rendererWidget_ = nullptr;
     GpuFrameRenderer::DmaGlFailedHandler dmaGlFailedHandler_;
@@ -1063,6 +1189,11 @@ private:
     std::atomic<int> uiFrameCount_{0};
     std::atomic<int> presentDmaCount_{0};
     std::atomic<int> presentCpuCount_{0};
+    int zoomPercent_ = 0;
+    double panX_ = 0.0;
+    double panY_ = 0.0;
+    bool dragging_ = false;
+    QPoint lastDragPos_;
 };
 
 
@@ -1280,8 +1411,6 @@ constexpr auto playbackSliderStyle = R"(
         border-radius: 9px;
     }
 )";
-constexpr bool showVideoStatsOverlay = true;
-constexpr bool showAdvancedVideoStats = true;
 
 QPixmap renderIconPixmap(const QString &resourcePath, const QColor &color, const int size)
 {
@@ -1597,6 +1726,13 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1200, 760);
     setMinimumSize(820, 520);
 
+    statsOverlayPosition_ = static_cast<StatsOverlayPosition>(settings_.statsPosition());
+    lowFpsWarningsEnabled_ = settings_.lowFpsWarningsEnabled();
+    debugStatsEnabled_ = settings_.debugStatsEnabled();
+    rotationDegrees_ = settings_.rotationDegrees();
+    flipHorizontal_ = settings_.flipHorizontal();
+    flipVertical_ = settings_.flipVertical();
+
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     controlsHideTimer_->setInterval(3000);
@@ -1632,6 +1768,14 @@ MainWindow::~MainWindow()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (lowFpsWarningOverlay_ && watched == lowFpsWarningOverlay_ && event->type() == QEvent::MouseButtonPress) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Low FPS warning"),
+            QStringLiteral("Playback FPS is significantly below requested FPS. Try reducing resolution/FPS, avoiding USB hubs, or using a faster USB port."));
+        return true;
+    }
+
     if (playbackControls_ && event->type() == QEvent::MouseMove) {
         if (auto *widget = qobject_cast<QWidget *>(watched); widget != nullptr) {
             if (widget == this || isAncestorOf(widget)) {
@@ -1650,6 +1794,10 @@ void MainWindow::buildStoppedState()
     playbackMuted_ = false;
     playbackControls_.clear();
     statsOverlay_.clear();
+    lowFpsWarningOverlay_.clear();
+    lowFpsBelowThresholdSinceMs_ = 0;
+    lowFpsRecoveredSinceMs_ = 0;
+    lowFpsVisible_ = false;
     latestTelemetry_ = {};
     cachedStatsOverlayText_.clear();
     displayPath_ = capture::VideoDisplayPath::Unknown;
@@ -2100,6 +2248,7 @@ void MainWindow::showConnectingState()
     }
     playbackControls_.clear();
     statsOverlay_.clear();
+    lowFpsWarningOverlay_.clear();
     latestTelemetry_ = {};
     cachedStatsOverlayText_.clear();
     displayPath_ = capture::VideoDisplayPath::Unknown;
@@ -2204,6 +2353,18 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     statsOverlay_ = statsOverlay;
     video->setOverlay(statsOverlay);
 
+    auto *lowFpsWarning = new QLabel(QStringLiteral("Low FPS detected"), video);
+    lowFpsWarning->setAlignment(Qt::AlignCenter);
+    lowFpsWarning->setMargin(8);
+    lowFpsWarning->setStyleSheet(QStringLiteral(
+        "QLabel { color: #FFE082; background-color: rgba(0, 0, 0, 180); "
+        "border: 1px solid rgba(255, 224, 130, 150); border-radius: 8px; font-weight: 700; }"));
+    lowFpsWarning->hide();
+    lowFpsWarning->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+    lowFpsWarning->setCursor(Qt::PointingHandCursor);
+    lowFpsWarning->installEventFilter(this);
+    lowFpsWarningOverlay_ = lowFpsWarning;
+
     layout->addWidget(video, 1);
 
     auto *controls = new QFrame(video);
@@ -2235,7 +2396,10 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     playbackMuted_ = false;
     volumeSlider->setEnabled(true);
     auto *zoomSlider = makePlaybackSlider(controls);
-    zoomSlider->setValue(0);
+    zoomPercent_ = 0;
+    zoomSlider->setValue(zoomPercent_);
+    video->setZoomPercent(zoomPercent_);
+    video->setViewOrientation(rotationDegrees_, flipHorizontal_, flipVertical_);
 
     connect(powerButton, &QPushButton::clicked, this, [this, powerButton]() {
         powerButton->setEnabled(false);
@@ -2263,6 +2427,11 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     connect(volumeSlider, &QSlider::valueChanged, volumeButton, [this, volumeButton, volumeOnIcon, volumeOffIcon](const int value) {
         setPlaybackButtonPixmap(volumeButton, (playbackMuted_ || value <= 0) ? volumeOffIcon : volumeOnIcon);
     });
+    connect(zoomSlider, &QSlider::valueChanged, this, [this, video](const int value) {
+        zoomPercent_ = std::clamp(value, 0, 100);
+        video->setZoomPercent(zoomPercent_);
+        resetPlaybackControlsTimer();
+    });
     setPlaybackButtonPixmap(volumeButton, (playbackMuted_ || volumeSlider->value() <= 0) ? volumeOffIcon : volumeOnIcon);
 
     controlsLayout->addWidget(powerButton);
@@ -2284,7 +2453,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     if (firstFrame && !firstFrame->isNull()) {
         updateVideoFrame(std::move(firstFrame));
     }
-    if (statsOverlayTimer_ != nullptr && showVideoStatsOverlay) {
+    if (statsOverlayTimer_ != nullptr) {
         statsOverlayTimer_->start();
     }
     showPlaybackControls();
@@ -2346,7 +2515,7 @@ void MainWindow::recordPresentLatency(const qint64 latencyNs)
 
 void MainWindow::updateStatsOverlay()
 {
-    if (!statsOverlay_) {
+    if (!statsOverlay_ || !videoSurface_) {
         return;
     }
 
@@ -2377,32 +2546,32 @@ void MainWindow::updateStatsOverlay()
     const auto previousCachedText = cachedStatsOverlayText_;
     refreshStatsOverlayCache();
 
-    if (!showVideoStatsOverlay) {
-        if (statsOverlay_->isVisible()) {
-            statsOverlay_->hide();
-        }
-        return;
-    }
-
-    if (cachedStatsOverlayText_ == previousCachedText && cachedStatsOverlayText_ == statsOverlay_->text()) {
+    const auto showStats = statsOverlayPosition_ != StatsOverlayPosition::Off;
+    if (!showStats) {
+        statsOverlay_->hide();
+    } else if (cachedStatsOverlayText_ == previousCachedText && cachedStatsOverlayText_ == statsOverlay_->text()) {
         if (!statsOverlay_->isVisible()) {
             statsOverlay_->show();
             statsOverlay_->update();
         }
-        return;
+    } else {
+        statsOverlay_->setText(cachedStatsOverlayText_);
+        statsOverlay_->adjustSize();
+        if (!statsOverlay_->isVisible()) {
+            statsOverlay_->show();
+        }
+        const int margin = 14;
+        const auto overlayWidth = std::min(statsOverlay_->sizeHint().width(), std::max(0, videoSurface_->width() - margin * 2));
+        const auto overlayHeight = statsOverlay_->sizeHint().height();
+        const auto x = statsOverlayPosition_ == StatsOverlayPosition::BottomRight
+            ? std::max(margin, videoSurface_->width() - overlayWidth - margin)
+            : margin;
+        const auto y = std::max(margin, videoSurface_->height() - overlayHeight - margin);
+        statsOverlay_->setGeometry(x, y, overlayWidth, overlayHeight);
+        statsOverlay_->update();
     }
 
-    statsOverlay_->setText(cachedStatsOverlayText_);
-    const auto prevSize = statsOverlay_->size();
-    statsOverlay_->adjustSize();
-    if (videoSurface_ && statsOverlay_->size() != prevSize) {
-        videoSurface_->repositionOverlays();
-    }
-    if (!statsOverlay_->isVisible()) {
-        statsOverlay_->show();
-    }
-    // Deferred QLabel repaint only — never repaint() the video renderer from the stats path.
-    statsOverlay_->update();
+    updateLowFpsWarning();
 }
 
 void MainWindow::refreshStatsOverlayCache()
@@ -2439,19 +2608,74 @@ QString MainWindow::formatStatsOverlayText() const
         QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
 
-    if (!showAdvancedVideoStats) {
+    if (!debugStatsEnabled_) {
         return fields.join(QStringLiteral(" | "));
     }
 
-    fields += QStringList {
+    QStringList advanced {
         QStringLiteral("UI:%1").arg(QString::number(uiFps_, 'f', 0)),
         QStringLiteral("Paint:%1").arg(QString::number(paintFps_, 'f', 0)),
-        QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1)),
         QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
         QStringLiteral("Buf:%1").arg(latestTelemetry_.bufferCount),
         QStringLiteral("Payload:%1KiB").arg(QString::number(latestTelemetry_.payloadAvgKb, 'f', 0)),
     };
+    if (displayPath_ != capture::VideoDisplayPath::Gpu) {
+        advanced << QStringLiteral("Cnv:%1").arg(QString::number(latestTelemetry_.decodeAvgMs, 'f', 1));
+    }
+    fields += advanced;
     return fields.join(QStringLiteral(" | "));
+}
+
+void MainWindow::updateLowFpsWarning()
+{
+    if (!lowFpsWarningOverlay_ || !videoSurface_) {
+        return;
+    }
+    if (!lowFpsWarningsEnabled_) {
+        lowFpsWarningOverlay_->hide();
+        lowFpsVisible_ = false;
+        lowFpsBelowThresholdSinceMs_ = 0;
+        lowFpsRecoveredSinceMs_ = 0;
+        return;
+    }
+
+    const auto configured = latestTelemetry_.configuredFps > 0.0 ? latestTelemetry_.configuredFps : selectedFormat_.framesPerSecond;
+    const auto actual = latestTelemetry_.decodedFps;
+    const auto nowMs = capture::monotonicClockNs() / 1'000'000;
+    const auto belowThreshold = configured > 0.0 && actual > 0.0 && (configured - actual) >= 10.0;
+
+    if (belowThreshold) {
+        lowFpsRecoveredSinceMs_ = 0;
+        if (lowFpsBelowThresholdSinceMs_ == 0) {
+            lowFpsBelowThresholdSinceMs_ = nowMs;
+        }
+        if (!lowFpsVisible_ && (nowMs - lowFpsBelowThresholdSinceMs_) >= 3000) {
+            lowFpsVisible_ = true;
+        }
+    } else {
+        lowFpsBelowThresholdSinceMs_ = 0;
+        if (lowFpsRecoveredSinceMs_ == 0) {
+            lowFpsRecoveredSinceMs_ = nowMs;
+        }
+        if (lowFpsVisible_ && (nowMs - lowFpsRecoveredSinceMs_) >= 3000) {
+            lowFpsVisible_ = false;
+        }
+    }
+
+    if (!lowFpsVisible_) {
+        lowFpsWarningOverlay_->hide();
+        return;
+    }
+
+    lowFpsWarningOverlay_->adjustSize();
+    const int margin = 14;
+    const auto width = std::min(lowFpsWarningOverlay_->sizeHint().width(), std::max(0, videoSurface_->width() - margin * 2));
+    const auto height = lowFpsWarningOverlay_->sizeHint().height();
+    const auto alignRight = statsOverlayPosition_ != StatsOverlayPosition::Off;
+    const auto x = alignRight ? std::max(margin, videoSurface_->width() - width - margin) : margin;
+    const auto y = std::max(margin, videoSurface_->height() - height - margin);
+    lowFpsWarningOverlay_->setGeometry(x, y, width, height);
+    lowFpsWarningOverlay_->show();
 }
 
 void MainWindow::preconfigureSelectedFormat(const bool force)
@@ -2698,13 +2922,21 @@ void MainWindow::uninhibitScreenSaver()
     }
 }
 
+void MainWindow::applyPlaybackViewSettings()
+{
+    if (videoSurface_) {
+        videoSurface_->setViewOrientation(rotationDegrees_, flipHorizontal_, flipVertical_);
+    }
+    updateStatsOverlay();
+}
+
 void MainWindow::showSettingsDialog()
 {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Settings"));
     dialog.setWindowIcon(createAppIcon());
     dialog.setStyleSheet(QString::fromUtf8(dialogStyle));
-    dialog.resize(580, 420);
+    dialog.resize(640, 560);
 
     auto *layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 24, 24, 20);
@@ -2713,19 +2945,115 @@ void MainWindow::showSettingsDialog()
     layout->addLayout(makeModalHeader(QStringLiteral("Settings"), QString(), 48, &dialog));
     layout->addWidget(makeDivider(&dialog));
 
-    addInfoRow(
-        layout,
-        &dialog,
-        QStringLiteral(":/icons/settings.svg"),
-        QStringLiteral("Playback settings"),
-        QStringLiteral("Video stats, low-frame-rate warnings, flip, rotation, and other playback preferences will be added with the mock playback UX."));
-    addInfoRow(
-        layout,
-        &dialog,
-        QStringLiteral(":/icons/volume-2.svg"),
-        QStringLiteral("Volume"),
-        QStringLiteral("The app volume preference is already backed by QSettings and will be wired to the playback controls."));
+    auto *statsLabel = new QLabel(QStringLiteral("Stats overlay"), &dialog);
+    statsLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
+    layout->addWidget(statsLabel);
+    auto *statsOff = new QRadioButton(QStringLiteral("Off"), &dialog);
+    auto *statsBottomLeft = new QRadioButton(QStringLiteral("Bottom left"), &dialog);
+    auto *statsBottomRight = new QRadioButton(QStringLiteral("Bottom right"), &dialog);
+    auto *statsGroup = new QButtonGroup(&dialog);
+    statsGroup->addButton(statsOff, static_cast<int>(StatsOverlayPosition::Off));
+    statsGroup->addButton(statsBottomLeft, static_cast<int>(StatsOverlayPosition::BottomLeft));
+    statsGroup->addButton(statsBottomRight, static_cast<int>(StatsOverlayPosition::BottomRight));
+    if (auto *checked = statsGroup->button(static_cast<int>(statsOverlayPosition_))) {
+        checked->setChecked(true);
+    }
+    auto *statsRow = new QHBoxLayout();
+    statsRow->setSpacing(22);
+    statsRow->addWidget(statsOff);
+    statsRow->addWidget(statsBottomLeft);
+    statsRow->addWidget(statsBottomRight);
+    statsRow->addStretch();
+    layout->addLayout(statsRow);
 
+    auto *lowFpsToggle = new QCheckBox(QStringLiteral("Low FPS warnings"), &dialog);
+    lowFpsToggle->setChecked(lowFpsWarningsEnabled_);
+    auto *debugToggle = new QCheckBox(QStringLiteral("Show advanced stats"), &dialog);
+    debugToggle->setChecked(debugStatsEnabled_);
+    debugToggle->setEnabled(statsOverlayPosition_ != StatsOverlayPosition::Off);
+    auto *statsTogglesRow = new QHBoxLayout();
+    statsTogglesRow->setSpacing(22);
+    statsTogglesRow->addWidget(lowFpsToggle);
+    statsTogglesRow->addWidget(debugToggle);
+    statsTogglesRow->addStretch();
+    layout->addLayout(statsTogglesRow);
+
+    layout->addWidget(makeDivider(&dialog));
+    auto *rotationLabel = new QLabel(QStringLiteral("Rotation"), &dialog);
+    rotationLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
+    layout->addWidget(rotationLabel);
+    auto *rot0 = new QRadioButton(QStringLiteral("0°"), &dialog);
+    auto *rot90 = new QRadioButton(QStringLiteral("90°"), &dialog);
+    auto *rot180 = new QRadioButton(QStringLiteral("180°"), &dialog);
+    auto *rot270 = new QRadioButton(QStringLiteral("270°"), &dialog);
+    auto *rotationGroup = new QButtonGroup(&dialog);
+    rotationGroup->addButton(rot0, 0);
+    rotationGroup->addButton(rot90, 90);
+    rotationGroup->addButton(rot180, 180);
+    rotationGroup->addButton(rot270, 270);
+    if (auto *checked = rotationGroup->button(rotationDegrees_)) {
+        checked->setChecked(true);
+    } else {
+        rot0->setChecked(true);
+    }
+    auto *rotationRow = new QHBoxLayout();
+    rotationRow->setSpacing(22);
+    rotationRow->addWidget(rot0);
+    rotationRow->addWidget(rot90);
+    rotationRow->addWidget(rot180);
+    rotationRow->addWidget(rot270);
+    rotationRow->addStretch();
+    layout->addLayout(rotationRow);
+
+    auto *flipH = new QCheckBox(QStringLiteral("Flip horizontal"), &dialog);
+    flipH->setChecked(flipHorizontal_);
+    auto *flipV = new QCheckBox(QStringLiteral("Flip vertical"), &dialog);
+    flipV->setChecked(flipVertical_);
+    auto *flipRow = new QHBoxLayout();
+    flipRow->setSpacing(22);
+    flipRow->addWidget(flipH);
+    flipRow->addWidget(flipV);
+    flipRow->addStretch();
+    layout->addLayout(flipRow);
+
+    connect(statsGroup, &QButtonGroup::idClicked, this, [this, debugToggle](const int id) {
+        statsOverlayPosition_ = static_cast<StatsOverlayPosition>(id);
+        settings_.setStatsPosition(id);
+        debugToggle->setEnabled(statsOverlayPosition_ != StatsOverlayPosition::Off);
+        if (statsOverlayPosition_ == StatsOverlayPosition::Off) {
+            debugStatsEnabled_ = false;
+            debugToggle->setChecked(false);
+            settings_.setDebugStatsEnabled(false);
+        }
+        updateStatsOverlay();
+    });
+    connect(lowFpsToggle, &QCheckBox::toggled, this, [this](const bool checked) {
+        lowFpsWarningsEnabled_ = checked;
+        settings_.setLowFpsWarningsEnabled(checked);
+        updateLowFpsWarning();
+    });
+    connect(debugToggle, &QCheckBox::toggled, this, [this](const bool checked) {
+        debugStatsEnabled_ = checked;
+        settings_.setDebugStatsEnabled(checked);
+        updateStatsOverlay();
+    });
+    connect(rotationGroup, &QButtonGroup::idClicked, this, [this](const int id) {
+        rotationDegrees_ = id;
+        settings_.setRotationDegrees(id);
+        applyPlaybackViewSettings();
+    });
+    connect(flipH, &QCheckBox::toggled, this, [this](const bool checked) {
+        flipHorizontal_ = checked;
+        settings_.setFlipHorizontal(checked);
+        applyPlaybackViewSettings();
+    });
+    connect(flipV, &QCheckBox::toggled, this, [this](const bool checked) {
+        flipVertical_ = checked;
+        settings_.setFlipVertical(checked);
+        applyPlaybackViewSettings();
+    });
+
+    layout->addWidget(makeDivider(&dialog));
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
     layout->addStretch();

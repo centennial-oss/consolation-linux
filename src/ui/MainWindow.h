@@ -35,6 +35,12 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    enum class StatsOverlayPosition {
+        Off = 0,
+        BottomLeft = 1,
+        BottomRight = 2,
+    };
+
     void buildStoppedState();
     void startPlayback();
     void showConnectingState();
@@ -59,6 +65,8 @@ private:
     void showSettingsDialog();
     void showHelpDialog();
     void showAboutDialog();
+    void applyPlaybackViewSettings();
+    void updateLowFpsWarning();
 
     settings::AppSettings settings_;
     std::vector<capture::CaptureDevice> devices_;
@@ -67,6 +75,7 @@ private:
     QString preconfiguredFormatKey_;
     QPointer<VideoSurface> videoSurface_;
     QPointer<QLabel> statsOverlay_;
+    QPointer<QLabel> lowFpsWarningOverlay_;
     QPointer<QFrame> playbackControls_;
     QTimer *controlsHideTimer_ = nullptr;
     QTimer *statsOverlayTimer_ = nullptr;
@@ -80,6 +89,16 @@ private:
     int presentLagSampleCount_ = 0;
     qint64 presentLagTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
+    StatsOverlayPosition statsOverlayPosition_ = StatsOverlayPosition::Off;
+    bool lowFpsWarningsEnabled_ = true;
+    bool debugStatsEnabled_ = false;
+    int rotationDegrees_ = 0;
+    bool flipHorizontal_ = false;
+    bool flipVertical_ = false;
+    int zoomPercent_ = 0;
+    qint64 lowFpsBelowThresholdSinceMs_ = 0;
+    qint64 lowFpsRecoveredSinceMs_ = 0;
+    bool lowFpsVisible_ = false;
     bool playbackMuted_ = false;
     std::atomic<bool> playbackStopping_{false};
     std::unique_ptr<audio::AudioSession> audioSession_;

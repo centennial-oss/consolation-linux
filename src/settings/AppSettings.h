@@ -19,6 +19,24 @@ public:
     [[nodiscard]] QString lastSelectedDeviceId() const;
     void setLastSelectedDeviceId(const QString &deviceId);
 
+    [[nodiscard]] int statsPosition() const;
+    void setStatsPosition(int position);
+
+    [[nodiscard]] bool lowFpsWarningsEnabled() const;
+    void setLowFpsWarningsEnabled(bool enabled);
+
+    [[nodiscard]] bool debugStatsEnabled() const;
+    void setDebugStatsEnabled(bool enabled);
+
+    [[nodiscard]] int rotationDegrees() const;
+    void setRotationDegrees(int rotationDegrees);
+
+    [[nodiscard]] bool flipHorizontal() const;
+    void setFlipHorizontal(bool enabled);
+
+    [[nodiscard]] bool flipVertical() const;
+    void setFlipVertical(bool enabled);
+
 private:
     QSettings settings_;
 };
