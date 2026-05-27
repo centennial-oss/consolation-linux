@@ -324,7 +324,7 @@ public:
     void releaseDmaGlState()
     {
         dmaFrame_.reset();
-        boundDmaFrame_.reset();
+        clearBoundDmaIdentity();
         if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
             return;
         }
@@ -388,7 +388,7 @@ public:
     void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
     {
         dmaFrame_.reset();
-        boundDmaFrame_.reset();
+        clearBoundDmaIdentity();
         switch (activeGlRenderer_) {
         case 0: if (nv12Gl_.has_value())  { nv12Gl_->releaseFrame(); }  break;
         case 1: if (rgbGl_.has_value())   { rgbGl_->releaseFrame(); }   break;
@@ -407,7 +407,6 @@ public:
     void setDmaFrame(capture::DmaBufFrameHandle frame) override
     {
         frame_.reset();
-        boundDmaFrame_.reset();
         displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
         dmaFrame_ = std::move(frame);
         updateTargetRect();
@@ -553,6 +552,26 @@ private:
             targetSize);
     }
 
+    [[nodiscard]] bool isBoundToDmaFrame(const capture::DmaBufFrame &frame) const
+    {
+        return boundDmaBufferIndex_ == frame.bufferIndex && boundDmaFd_ == frame.dmaFd &&
+            boundDmaLayout_ == frame.layout;
+    }
+
+    void setBoundDmaIdentity(const capture::DmaBufFrame &frame)
+    {
+        boundDmaBufferIndex_ = frame.bufferIndex;
+        boundDmaFd_ = frame.dmaFd;
+        boundDmaLayout_ = frame.layout;
+    }
+
+    void clearBoundDmaIdentity()
+    {
+        boundDmaBufferIndex_ = -1;
+        boundDmaFd_ = -1;
+        boundDmaLayout_ = capture::DmaBufLayout::Unknown;
+    }
+
     bool tryPaintDmaFrame()
     {
         if (!dmaFrame_) {
@@ -564,17 +583,19 @@ private:
             return false;
         }
 
+        const auto &frame = *dmaFrame_;
+        const auto needsBind = !isBoundToDmaFrame(frame);
         const auto dpr = dpr_;
-        if (dmaFrame_->layout == capture::DmaBufLayout::Nv12) {
+        if (frame.layout == capture::DmaBufLayout::Nv12) {
             if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
                 return false;
             }
-            if (boundDmaFrame_ != dmaFrame_) {
+            if (needsBind) {
                 if (!nv12Gl_->bindFrame(dmaFrame_)) {
-                    boundDmaFrame_.reset();
+                    clearBoundDmaIdentity();
                     return false;
                 }
-                boundDmaFrame_ = dmaFrame_;
+                setBoundDmaIdentity(frame);
             }
             activeGlRenderer_ = 0;
             nv12Gl_->draw(size(), targetRect_, dpr);
@@ -583,17 +604,16 @@ private:
             return true;
         }
 
-        if (dmaFrame_->layout == capture::DmaBufLayout::Rgb888 ||
-            dmaFrame_->layout == capture::DmaBufLayout::Bgr888) {
+        if (frame.layout == capture::DmaBufLayout::Rgb888 || frame.layout == capture::DmaBufLayout::Bgr888) {
             if (!rgbGl_ || !rgbGl_->isAvailable()) {
                 return false;
             }
-            if (boundDmaFrame_ != dmaFrame_) {
+            if (needsBind) {
                 if (!rgbGl_->bindFrame(dmaFrame_)) {
-                    boundDmaFrame_.reset();
+                    clearBoundDmaIdentity();
                     return false;
                 }
-                boundDmaFrame_ = dmaFrame_;
+                setBoundDmaIdentity(frame);
             }
             activeGlRenderer_ = 1;
             rgbGl_->draw(size(), targetRect_, dpr);
@@ -602,16 +622,16 @@ private:
             return true;
         }
 
-        if (dmaFrame_->layout == capture::DmaBufLayout::Yuyv422) {
+        if (frame.layout == capture::DmaBufLayout::Yuyv422) {
             if (!yuyvGl_ || !yuyvGl_->isAvailable()) {
                 return false;
             }
-            if (boundDmaFrame_ != dmaFrame_) {
+            if (needsBind) {
                 if (!yuyvGl_->bindFrame(dmaFrame_)) {
-                    boundDmaFrame_.reset();
+                    clearBoundDmaIdentity();
                     return false;
                 }
-                boundDmaFrame_ = dmaFrame_;
+                setBoundDmaIdentity(frame);
             }
             activeGlRenderer_ = 2;
             yuyvGl_->draw(size(), targetRect_, dpr);
@@ -620,17 +640,16 @@ private:
             return true;
         }
 
-        if (dmaFrame_->layout == capture::DmaBufLayout::I420 ||
-            dmaFrame_->layout == capture::DmaBufLayout::Yv12) {
+        if (frame.layout == capture::DmaBufLayout::I420 || frame.layout == capture::DmaBufLayout::Yv12) {
             if (!i420Gl_ || !i420Gl_->isAvailable()) {
                 return false;
             }
-            if (boundDmaFrame_ != dmaFrame_) {
+            if (needsBind) {
                 if (!i420Gl_->bindFrame(dmaFrame_)) {
-                    boundDmaFrame_.reset();
+                    clearBoundDmaIdentity();
                     return false;
                 }
-                boundDmaFrame_ = dmaFrame_;
+                setBoundDmaIdentity(frame);
             }
             activeGlRenderer_ = 3;
             i420Gl_->draw(size(), targetRect_, dpr);
@@ -657,7 +676,9 @@ private:
     std::optional<platform::linux::I420DmaBufGl> i420Gl_;
     capture::FrameHandle frame_;
     capture::DmaBufFrameHandle dmaFrame_;
-    capture::DmaBufFrameHandle boundDmaFrame_;
+    int boundDmaBufferIndex_ = -1;
+    int boundDmaFd_ = -1;
+    capture::DmaBufLayout boundDmaLayout_ = capture::DmaBufLayout::Unknown;
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     std::function<void()> firstFramePaintedHandler_;
