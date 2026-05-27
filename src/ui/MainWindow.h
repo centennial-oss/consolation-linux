@@ -80,6 +80,7 @@ private:
     int presentLagSampleCount_ = 0;
     qint64 presentLagTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
+    bool playbackMuted_ = false;
     std::atomic<bool> playbackStopping_{false};
     std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;

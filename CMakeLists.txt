@@ -94,12 +94,42 @@ if(UNIX AND NOT APPLE)
 endif()
 
 add_executable(consolation
-    resources/consolation.qrc
     src/app/main.cpp
     src/ui/AppIcon.cpp
     src/ui/AppIcon.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+)
+
+qt_add_resources(consolation "consolation"
+    PREFIX "/icons"
+    BASE assets/icons
+    FILES
+        assets/icons/power.svg
+        assets/icons/settings.svg
+        assets/icons/zoom-out.svg
+        assets/icons/zoom-in.svg
+        assets/icons/play.svg
+        assets/icons/circle-play.svg
+        assets/icons/square-stack.svg
+        assets/icons/fullscreen.svg
+        assets/icons/volume-2.svg
+        assets/icons/volume-off.svg
+        assets/icons/usb.svg
+        assets/icons/triangle-alert.svg
+        assets/icons/shield.svg
+        assets/icons/heart.svg
+        assets/icons/file-text.svg
+        assets/icons/info.svg
+        assets/icons/circle-question-mark.svg
+)
+
+qt_add_resources(consolation "consolation_app_icons"
+    PREFIX "/app"
+    BASE assets/icons
+    FILES
+        assets/icons/app-icon.png
+        assets/icons/app-icon-large.png
 )
 
 target_link_libraries(consolation

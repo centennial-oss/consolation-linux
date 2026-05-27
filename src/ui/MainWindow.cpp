@@ -35,7 +35,6 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
-#include <QIODevice>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QMenu>
@@ -1249,29 +1248,37 @@ constexpr auto playbackButtonStyle = R"(
     QPushButton {
         background-color: rgba(255, 255, 255, 22);
         border: none;
-        border-radius: 32px;
+        padding: 0;
     }
     QPushButton:hover {
         background-color: rgba(255, 255, 255, 42);
     }
 )";
 constexpr auto playbackSliderStyle = R"(
+    QSlider {
+        min-height: 34px;
+        background: transparent;
+    }
     QSlider::groove:horizontal {
-        height: 8px;
-        background: rgba(255, 255, 255, 145);
-        border-radius: 4px;
+        height: 6px;
+        background: transparent;
+        border-radius: 3px;
     }
     QSlider::sub-page:horizontal {
         background: #CC11BB;
-        border-radius: 4px;
+        border-radius: 3px;
+    }
+    QSlider::add-page:horizontal {
+        background: rgba(255, 255, 255, 145);
+        border-radius: 3px;
     }
     QSlider::handle:horizontal {
         background: #CC11BB;
-        border: 6px solid #4a4a4f;
+        border: 0px solid transparent;
         width: 18px;
         height: 18px;
-        margin: -11px 0;
-        border-radius: 15px;
+        margin: -9px 0;
+        border-radius: 9px;
     }
 )";
 constexpr bool showVideoStatsOverlay = true;
@@ -1279,20 +1286,25 @@ constexpr bool showAdvancedVideoStats = true;
 
 QPixmap renderIconPixmap(const QString &resourcePath, const QColor &color, const int size)
 {
+    // QSvgRenderer does not load Qt resource URLs (:/...) on all platforms; read via QFile.
     QFile file(resourcePath);
     if (!file.open(QIODevice::ReadOnly)) {
         return {};
     }
 
-    auto svg = QString::fromUtf8(file.readAll());
-    svg.replace(QStringLiteral("currentColor"), color.name(QColor::HexRgb));
+    QSvgRenderer renderer(file.readAll());
+    if (!renderer.isValid()) {
+        return {};
+    }
 
-    QSvgRenderer renderer(svg.toUtf8());
     QPixmap pixmap(size, size);
     pixmap.fill(Qt::transparent);
 
     QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
     renderer.render(&painter);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(pixmap.rect(), color);
     painter.end();
     return pixmap;
 }
@@ -1319,13 +1331,12 @@ protected:
     }
 };
 
-QLabel *makePlaceholderIcon(QWidget *parent)
+QLabel *makeAppIconLabel(const int size, const int cornerRadius, QWidget *parent)
 {
     auto *icon = new QLabel(parent);
-    icon->setFixedSize(64, 64);
-    icon->setPixmap(createAppIcon().pixmap(64, 64));
-    icon->setScaledContents(true);
-    icon->setStyleSheet(QStringLiteral("border-radius: 16px;"));
+    icon->setFixedSize(size, size);
+    icon->setPixmap(appIconPixmap(size, cornerRadius));
+    icon->setScaledContents(false);
     return icon;
 }
 
@@ -1448,44 +1459,30 @@ QFrame *makeBarDivider(QWidget *parent)
 {
     auto *divider = new QFrame(parent);
     divider->setFrameShape(QFrame::VLine);
-    divider->setFixedHeight(38);
+    divider->setFixedHeight(32);
     divider->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 70);"));
     return divider;
 }
 
 void setPlaybackButtonPixmap(QPushButton *button, const QPixmap &pixmap)
 {
-    if (button == nullptr) {
+    if (button == nullptr || pixmap.isNull()) {
         return;
     }
 
-    auto *iconLabel = button->findChild<QLabel *>(QStringLiteral("playbackButtonIcon"));
-    if (iconLabel == nullptr) {
-        return;
-    }
-
-    iconLabel->setPixmap(pixmap);
+    button->setIcon(QIcon(pixmap));
 }
 
-QPushButton *makePlaybackCircleButton(const QPixmap &pixmap, QWidget *parent)
+QPushButton *makePlaybackCircleButton(const QPixmap &pixmap, const int diameter, QWidget *parent)
 {
     auto *button = new QPushButton(parent);
-    button->setFixedSize(36, 36);
-    button->setStyleSheet(QString::fromUtf8(playbackButtonStyle));
-
-    auto *layout = new QVBoxLayout(button);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-
-    auto *iconLabel = new QLabel(button);
-    iconLabel->setObjectName(QStringLiteral("playbackButtonIcon"));
-    iconLabel->setFixedSize(24, 24);
-    iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setPixmap(pixmap);
-    iconLabel->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
-    iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    layout->addWidget(iconLabel, 0, Qt::AlignCenter);
-
+    button->setFixedSize(diameter, diameter);
+    button->setIconSize(QSize(diameter - 12, diameter - 12));
+    button->setStyleSheet(
+        QString::fromUtf8(playbackButtonStyle) +
+        QStringLiteral("QPushButton { border-radius: %1px; }").arg(diameter / 2));
+    button->setAttribute(Qt::WA_StyledBackground, true);
+    setPlaybackButtonPixmap(button, pixmap);
     return button;
 }
 
@@ -1518,29 +1515,72 @@ QSlider *makePlaybackSlider(QWidget *parent)
     auto *slider = new QSlider(Qt::Horizontal, parent);
     slider->setRange(0, 100);
     slider->setFixedWidth(170);
+    slider->setFixedHeight(34);
     slider->setStyleSheet(QString::fromUtf8(playbackSliderStyle));
     return slider;
 }
 
-void addInfoRow(QVBoxLayout *layout, QWidget *parent, const QString &symbol, const QString &title, const QString &body)
+void addInfoRow(
+    QVBoxLayout *layout,
+    QWidget *parent,
+    const QString &iconPath,
+    const QString &title,
+    const QString &body)
 {
     auto *row = new QHBoxLayout();
     row->setSpacing(14);
+    row->setContentsMargins(0, 2, 0, 8);
+    row->setAlignment(Qt::AlignTop);
 
-    auto *icon = new QLabel(symbol, parent);
-    icon->setFixedWidth(32);
+    const auto iconPixmap = renderIconPixmap(iconPath, QColor(255, 255, 255, 184), 24);
+    auto *icon = new QLabel(parent);
+    icon->setFixedSize(24, 24);
+    icon->setPixmap(iconPixmap);
     icon->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
-    icon->setStyleSheet(QStringLiteral("color: %1; font-size: 22px; font-weight: 700;").arg(accentColor));
 
-    auto *text = new QLabel(parent);
-    text->setWordWrap(true);
-    text->setTextFormat(Qt::RichText);
-    text->setText(QStringLiteral("<b>%1</b><br>%2").arg(title.toHtmlEscaped(), body.toHtmlEscaped()));
-    text->setStyleSheet(QStringLiteral("color: white; font-size: 14px; line-height: 1.3;"));
+    auto *textColumn = new QVBoxLayout();
+    textColumn->setSpacing(2);
+    textColumn->setContentsMargins(0, 0, 0, 0);
+
+    if (!title.isEmpty()) {
+        auto *titleLabel = new QLabel(title, parent);
+        titleLabel->setWordWrap(true);
+        titleLabel->setStyleSheet(QStringLiteral("color: white; font-size: 14px; font-weight: 700;"));
+        textColumn->addWidget(titleLabel);
+    }
+
+    auto *bodyLabel = new QLabel(body, parent);
+    bodyLabel->setWordWrap(true);
+    bodyLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bodyLabel->setTextFormat(Qt::RichText);
+    bodyLabel->setText(QStringLiteral("<div style=\"line-height: 130%%; padding-bottom: 2px;\">%1</div>")
+                           .arg(body.toHtmlEscaped()));
+    bodyLabel->setStyleSheet(QStringLiteral("color: white; font-size: 14px;"));
+    textColumn->addWidget(bodyLabel);
 
     row->addWidget(icon);
-    row->addWidget(text, 1);
+    row->addLayout(textColumn, 1);
     layout->addLayout(row);
+}
+
+QHBoxLayout *makeModalHeader(const QString &title, const QString &subtitle, const int iconSize, QWidget *parent)
+{
+    auto *header = new QHBoxLayout();
+    header->setAlignment(Qt::AlignVCenter);
+    header->setSpacing(14);
+    header->addWidget(makeAppIconLabel(iconSize, iconSize >= 64 ? 14 : 10, parent));
+    auto *titleBlock = new QVBoxLayout();
+    titleBlock->setSpacing(4);
+    auto *titleLabel = new QLabel(title, parent);
+    titleLabel->setStyleSheet(QStringLiteral("color: white; font-size: 26px; font-weight: 800;"));
+    titleBlock->addWidget(titleLabel);
+    if (!subtitle.isEmpty()) {
+        auto *subtitleLabel = new QLabel(subtitle, parent);
+        subtitleLabel->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 180); font-size: 14px;"));
+        titleBlock->addWidget(subtitleLabel);
+    }
+    header->addLayout(titleBlock, 1);
+    return header;
 }
 
 } // namespace
@@ -1608,6 +1648,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 void MainWindow::buildStoppedState()
 {
     playbackStopping_.store(false, std::memory_order_release);
+    playbackMuted_ = false;
     playbackControls_.clear();
     statsOverlay_.clear();
     latestTelemetry_ = {};
@@ -1643,7 +1684,7 @@ void MainWindow::buildStoppedState()
 
     auto *header = new QHBoxLayout();
     header->setSpacing(14);
-    header->addWidget(makePlaceholderIcon(panel));
+    header->addWidget(makeAppIconLabel(64, 14, panel));
 
     auto *title = new QLabel(QStringLiteral("Consolation"), panel);
     title->setStyleSheet(QStringLiteral("color: white; font-size: 31px; font-weight: 800;"));
@@ -1690,16 +1731,18 @@ void MainWindow::buildStoppedState()
 
     panelLayout->addLayout(form);
 
+    const auto playIcon = renderIconPixmap(QStringLiteral(":/icons/play.svg"), Qt::white, 42);
     auto *playButton = new QPushButton(panel);
-    playButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    playButton->setIcon(QIcon(playIcon));
     playButton->setIconSize(QSize(42, 42));
     playButton->setFixedSize(72, 72);
     playButton->setEnabled(false);
     playButton->setToolTip(QStringLiteral("Start playback."));
     playButton->setStyleSheet(QStringLiteral(
         "QPushButton { color: white; border-radius: 36px; border: none; "
-        "background-color: rgba(255, 255, 255, 85); }"
-        "QPushButton:disabled { background-color: rgba(255, 255, 255, 34); }"));
+        "background-color: rgba(255, 255, 255, 120); }"
+        "QPushButton:disabled { color: rgba(255, 255, 255, 120); "
+        "background-color: rgba(255, 255, 255, 55); }"));
     connect(playButton, &QPushButton::clicked, this, [this, playButton]() {
         const auto deviceIndex = selectedDevice_.devicePath.isEmpty() ? -1 : 0;
         Q_UNUSED(deviceIndex);
@@ -1867,16 +1910,16 @@ void MainWindow::buildStoppedState()
     buttonRow->addStretch();
 
     auto *settingsButton = makePillButton(
-        style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+        QIcon(renderIconPixmap(QStringLiteral(":/icons/settings.svg"), QColor(Qt::white), 20)),
         QStringLiteral("Settings"),
         root);
 
     auto *helpButton = makePillButton(
-        style()->standardIcon(QStyle::SP_MessageBoxQuestion),
+        QIcon(renderIconPixmap(QStringLiteral(":/icons/circle-question-mark.svg"), QColor(Qt::white), 20)),
         QStringLiteral("Help"),
         root);
     auto *aboutButton = makePillButton(
-        style()->standardIcon(QStyle::SP_MessageBoxInformation),
+        QIcon(renderIconPixmap(QStringLiteral(":/icons/info.svg"), QColor(Qt::white), 20)),
         QStringLiteral("About"),
         root);
 
@@ -2165,13 +2208,13 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     layout->addWidget(video, 1);
 
     auto *controls = new QFrame(video);
-    controls->setFixedHeight(58);
+    controls->setFixedHeight(64);
     controls->setStyleSheet(QStringLiteral(
         "QFrame { background-color: rgba(34, 34, 34, 221); "
-        "border: 1px solid rgba(68, 68, 68, 238); border-radius: 29px; }"));
+        "border: 1px solid rgba(68, 68, 68, 238); border-radius: 32px; }"));
 
     auto *controlsLayout = new QHBoxLayout(controls);
-    controlsLayout->setContentsMargins(12, 4, 12, 4);
+    controlsLayout->setContentsMargins(14, 8, 14, 8);
     controlsLayout->setSpacing(10);
 
     const auto whiteIcon = QColor(Qt::white);
@@ -2182,14 +2225,16 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     const auto zoomInIcon = renderIconPixmap(QStringLiteral(":/icons/zoom-in.svg"), whiteIcon, 22);
     const auto settingsIcon = renderIconPixmap(QStringLiteral(":/icons/settings.svg"), whiteIcon, 24);
 
-    auto *powerButton = makePlaybackCircleButton(powerIcon, controls);
-    auto *volumeButton = makePlaybackCircleButton(volumeOnIcon, controls);
+    auto *powerButton = makePlaybackCircleButton(powerIcon, 42, controls);
+    auto *volumeButton = makePlaybackCircleButton(volumeOnIcon, 36, controls);
     auto *zoomOut = makePlaybackIconLabel(zoomOutIcon, controls);
     auto *zoomIn = makePlaybackIconLabel(zoomInIcon, controls);
-    auto *settingsButton = makePlaybackCircleButton(settingsIcon, controls);
+    auto *settingsButton = makePlaybackCircleButton(settingsIcon, 42, controls);
 
     auto *volumeSlider = makePlaybackSlider(controls);
     volumeSlider->setValue(settings_.volumePercent());
+    playbackMuted_ = false;
+    volumeSlider->setEnabled(true);
     auto *zoomSlider = makePlaybackSlider(controls);
     zoomSlider->setValue(0);
 
@@ -2198,6 +2243,17 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
         stopPlaybackAsync();
     });
     connect(settingsButton, &QPushButton::clicked, this, [this]() { showSettingsDialog(); });
+    connect(volumeButton, &QPushButton::clicked, this, [this, volumeButton, volumeSlider, volumeOnIcon, volumeOffIcon]() {
+        playbackMuted_ = !playbackMuted_;
+        volumeSlider->setEnabled(!playbackMuted_);
+        if (audioSession_) {
+            audioSession_->setVolumePercent(playbackMuted_ ? 0 : volumeSlider->value());
+        }
+        setPlaybackButtonPixmap(
+            volumeButton,
+            (playbackMuted_ || volumeSlider->value() <= 0) ? volumeOffIcon : volumeOnIcon);
+        resetPlaybackControlsTimer();
+    });
     connect(volumeSlider, &QSlider::valueChanged, this, [this](const int value) {
         settings_.setVolumePercent(value);
         if (audioSession_) {
@@ -2205,10 +2261,10 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
         }
         resetPlaybackControlsTimer();
     });
-    connect(volumeSlider, &QSlider::valueChanged, volumeButton, [volumeButton, volumeOnIcon, volumeOffIcon](const int value) {
-        setPlaybackButtonPixmap(volumeButton, value <= 0 ? volumeOffIcon : volumeOnIcon);
+    connect(volumeSlider, &QSlider::valueChanged, volumeButton, [this, volumeButton, volumeOnIcon, volumeOffIcon](const int value) {
+        setPlaybackButtonPixmap(volumeButton, (playbackMuted_ || value <= 0) ? volumeOffIcon : volumeOnIcon);
     });
-    setPlaybackButtonPixmap(volumeButton, volumeSlider->value() <= 0 ? volumeOffIcon : volumeOnIcon);
+    setPlaybackButtonPixmap(volumeButton, (playbackMuted_ || volumeSlider->value() <= 0) ? volumeOffIcon : volumeOnIcon);
 
     controlsLayout->addWidget(powerButton);
     controlsLayout->addWidget(makeBarDivider(controls));
@@ -2647,28 +2703,27 @@ void MainWindow::showSettingsDialog()
 {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Settings"));
+    dialog.setWindowIcon(createAppIcon());
     dialog.setStyleSheet(QString::fromUtf8(dialogStyle));
     dialog.resize(580, 420);
 
     auto *layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 24, 24, 20);
-    layout->setSpacing(18);
+    layout->setSpacing(14);
 
-    auto *title = new QLabel(QStringLiteral("Settings"), &dialog);
-    title->setStyleSheet(QStringLiteral("font-size: 26px; font-weight: 800;"));
-    layout->addWidget(title);
+    layout->addLayout(makeModalHeader(QStringLiteral("Settings"), QString(), 48, &dialog));
     layout->addWidget(makeDivider(&dialog));
 
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("S"),
+        QStringLiteral(":/icons/settings.svg"),
         QStringLiteral("Playback settings"),
         QStringLiteral("Video stats, low-frame-rate warnings, flip, rotation, and other playback preferences will be added with the mock playback UX."));
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("V"),
+        QStringLiteral(":/icons/volume-2.svg"),
         QStringLiteral("Volume"),
         QStringLiteral("The app volume preference is already backed by QSettings and will be wired to the playback controls."));
 
@@ -2684,48 +2739,54 @@ void MainWindow::showHelpDialog()
 {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Help"));
+    dialog.setWindowIcon(createAppIcon());
     dialog.setStyleSheet(QString::fromUtf8(dialogStyle));
-    dialog.resize(680, 520);
+    dialog.resize(700, 620);
 
     auto *layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 24, 24, 20);
     layout->setSpacing(18);
 
-    auto *title = new QLabel(QStringLiteral("Help"), &dialog);
-    title->setStyleSheet(QStringLiteral("font-size: 26px; font-weight: 800;"));
-    layout->addWidget(title);
+    layout->addLayout(makeModalHeader(QStringLiteral("Consolation Help"), QString(), 48, &dialog));
     layout->addWidget(makeDivider(&dialog));
 
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral(">"),
-        QStringLiteral("Getting started"),
-        QStringLiteral("Connect a UVC capture card, choose the device and capture format, then press Play."));
+        QStringLiteral(":/icons/circle-play.svg"),
+        QStringLiteral("Getting Started"),
+        QStringLiteral("Connect a USB capture device, select it from the list, and press Play."));
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("FPS"),
-        QStringLiteral("Frame rate"),
-        QStringLiteral("Higher frame rates feel better for games, but require capture-card and USB bandwidth support."));
+        QStringLiteral(":/icons/square-stack.svg"),
+        QStringLiteral("Frame Rate"),
+        QStringLiteral(
+            "For best results, select the same frame rate as the source input. If playback frame rate is "
+            "lower than expected, avoid USB hubs and replace low-quality cables."));
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("[]"),
-        QStringLiteral("Video controls"),
-        QStringLiteral("During playback, controls will provide stop, app volume, zoom, pan, and settings access."));
+        QStringLiteral(":/icons/fullscreen.svg"),
+        QStringLiteral("Video Controls"),
+        QStringLiteral("Use the settings sheet to rotate/mirror the feed, and show performance stats."));
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("A"),
-        QStringLiteral("Audio"),
-        QStringLiteral("Consolation controls app playback volume independently of the system volume."));
+        QStringLiteral(":/icons/volume-2.svg"),
+        QStringLiteral("Audio Controls"),
+        QStringLiteral("Use the playback controls to mute playback and set the volume."));
     addInfoRow(
         layout,
         &dialog,
-        QStringLiteral("USB"),
-        QStringLiteral("Device support"),
-        QStringLiteral("Any Linux-supported UVC capture device should work once the real backend is implemented."));
+        QStringLiteral(":/icons/usb.svg"),
+        QStringLiteral("Device Support"),
+        QStringLiteral(
+            "While any USB Video Class (UVC) device should work with Consolation, video quality ultimately "
+            "depends on the capture device hardware. Some devices may advertise resolutions and frame rates "
+            "beyond their actual capabilities."));
+
+    layout->addWidget(makeDivider(&dialog));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
@@ -2738,41 +2799,65 @@ void MainWindow::showAboutDialog()
 {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("About Consolation"));
+    dialog.setWindowIcon(createAppIcon());
     dialog.setStyleSheet(QString::fromUtf8(dialogStyle));
-    dialog.resize(660, 610);
+    dialog.resize(660, 680);
 
     auto *layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(24, 24, 24, 20);
-    layout->setSpacing(16);
+    layout->setSpacing(12);
 
-    auto *header = new QHBoxLayout();
-    header->setSpacing(14);
-    header->addWidget(makePlaceholderIcon(&dialog));
+    layout->addLayout(makeModalHeader(
+        QStringLiteral("Consolation\u2122  v%1").arg(QString::fromUtf8(consolation::app::BuildInfo::releaseVersion)),
+        QStringLiteral("Copyright \u00a9 2026 Centennial OSS Inc."),
+        64,
+        &dialog));
 
-    auto *titleBlock = new QVBoxLayout();
-    auto *title = new QLabel(
-        QStringLiteral("Consolation %1").arg(QString::fromUtf8(consolation::app::BuildInfo::releaseVersion)),
-        &dialog);
-    title->setStyleSheet(QStringLiteral("font-size: 26px; font-weight: 800;"));
-    auto *subtitle = new QLabel(QStringLiteral("Copyright Centennial OSS Inc."), &dialog);
-    subtitle->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 180);"));
-    titleBlock->addWidget(title);
-    titleBlock->addWidget(subtitle);
-    header->addLayout(titleBlock, 1);
-    layout->addLayout(header);
-
-    auto *body = new QLabel(
+    auto *trademark = new QLabel(
         QStringLiteral(
-            "Consolation is a no-frills UVC capture viewer for using a Linux workstation "
-            "as a display for consoles, Raspberry Pis, and other HDMI devices through a capture card.\n\n"
-            "No recording, streaming, analytics, or network access is part of the app design. "
-            "Audio and video stay local and transient while you are watching."),
+            "Consolation and the Consolation logo are trademarks of Centennial OSS Inc.\n"
+            "All rights reserved."),
         &dialog);
-    body->setWordWrap(true);
-    body->setStyleSheet(QStringLiteral("font-size: 14px;"));
-    layout->addWidget(body);
+    trademark->setWordWrap(true);
+    trademark->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 210); font-size: 14px; padding-top: 6px;"));
+    layout->addWidget(trademark);
 
     layout->addWidget(makeDivider(&dialog));
+
+    addInfoRow(
+        layout,
+        &dialog,
+        QStringLiteral(":/icons/circle-play.svg"),
+        QString(),
+        QStringLiteral(
+            "Consolation is a USB Capture Card utility for viewing gaming consoles, Raspberry Pis, "
+            "and other HDMI devices on a Linux workstation."));
+    addInfoRow(
+        layout,
+        &dialog,
+        QStringLiteral(":/icons/triangle-alert.svg"),
+        QString(),
+        QStringLiteral("External USB Video Class (UVC) capture hardware is required."));
+    addInfoRow(
+        layout,
+        &dialog,
+        QStringLiteral(":/icons/shield.svg"),
+        QString(),
+        QStringLiteral(
+            "Consolation is 100% private. It does not collect analytics or snoop on your usage. "
+            "Nothing ever leaves your device. Period."));
+    addInfoRow(
+        layout,
+        &dialog,
+        QStringLiteral(":/icons/heart.svg"),
+        QString(),
+        QStringLiteral("This software is completely free and open source for you to enjoy."));
+    addInfoRow(
+        layout,
+        &dialog,
+        QStringLiteral(":/icons/file-text.svg"),
+        QString(),
+        QStringLiteral("Build info (copy for support)"));
 
     auto *buildInfo = new QTextEdit(&dialog);
     buildInfo->setReadOnly(true);
@@ -2780,10 +2865,12 @@ void MainWindow::showAboutDialog()
     buildInfo->setFixedHeight(120);
     layout->addWidget(buildInfo);
 
+    layout->addWidget(makeDivider(&dialog));
+
     auto *actions = new QHBoxLayout();
     auto *githubButton = new QPushButton(QStringLiteral("GitHub"), &dialog);
     auto *privacyButton = new QPushButton(QStringLiteral("Privacy Policy"), &dialog);
-    auto *copyButton = new QPushButton(QStringLiteral("Copy Build Info"), &dialog);
+    auto *copyButton = new QPushButton(QStringLiteral("Copy to Clipboard"), &dialog);
     auto *closeButton = new QPushButton(QStringLiteral("Close"), &dialog);
 
     connect(githubButton, &QPushButton::clicked, this, []() {

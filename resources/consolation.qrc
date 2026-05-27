@@ -1,9 +1,14 @@
 <RCC>
+    <qresource prefix="/app">
+        <file alias="app-icon.png">../assets/icons/app-icon.png</file>
+        <file alias="app-icon-large.png">../assets/icons/app-icon-large.png</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="power.svg">../assets/icons/power.svg</file>
         <file alias="settings.svg">../assets/icons/settings.svg</file>
         <file alias="zoom-out.svg">../assets/icons/zoom-out.svg</file>
         <file alias="zoom-in.svg">../assets/icons/zoom-in.svg</file>
+        <file alias="play.svg">../assets/icons/play.svg</file>
         <file alias="circle-play.svg">../assets/icons/circle-play.svg</file>
         <file alias="square-stack.svg">../assets/icons/square-stack.svg</file>
         <file alias="fullscreen.svg">../assets/icons/fullscreen.svg</file>

@@ -9,6 +9,9 @@
 
 int main(int argc, char *argv[])
 {
+    Q_INIT_RESOURCE(consolation);
+    Q_INIT_RESOURCE(consolation_app_icons);
+
     qRegisterMetaType<consolation::capture::FrameHandle>();
     qRegisterMetaType<consolation::capture::DmaBufFrameHandle>();
 
