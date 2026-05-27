@@ -28,8 +28,11 @@ sudo apt update
 packages=(
   build-essential
   cmake
+  libjpeg-turbo8-dev
   libpipewire-0.3-dev
+  libxkbcommon-dev
   ninja-build
+  pkg-config
   qt6-base-dev
   qt6-base-dev-tools
   libqt6svg6-dev
