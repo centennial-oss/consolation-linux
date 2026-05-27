@@ -4,3 +4,4 @@ TODO.md
 AGENTS.md
 .claude/
 build*/
+.DS_Store
