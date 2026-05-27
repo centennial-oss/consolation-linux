@@ -45,6 +45,7 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLWidget>
+#include <QSurfaceFormat>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
@@ -572,6 +573,11 @@ public:
         : QOpenGLWidget(parent)
     {
         setAutoFillBackground(false);
+        QSurfaceFormat fmt;
+        fmt.setSwapInterval(0);
+        fmt.setDepthBufferSize(0);
+        fmt.setStencilBufferSize(0);
+        setFormat(fmt);
     }
 
     void setDmaGlFailedHandler(DmaGlFailedHandler handler)
@@ -652,18 +658,14 @@ public:
     {
         dmaFrame_.reset();
         boundDmaFrame_.reset();
-        if (nv12Gl_.has_value()) {
-            nv12Gl_->releaseFrame();
+        switch (activeGlRenderer_) {
+        case 0: if (nv12Gl_.has_value())  { nv12Gl_->releaseFrame(); }  break;
+        case 1: if (rgbGl_.has_value())   { rgbGl_->releaseFrame(); }   break;
+        case 2: if (yuyvGl_.has_value())  { yuyvGl_->releaseFrame(); }  break;
+        case 3: if (i420Gl_.has_value())  { i420Gl_->releaseFrame(); }  break;
+        default: break;
         }
-        if (rgbGl_.has_value()) {
-            rgbGl_->releaseFrame();
-        }
-        if (yuyvGl_.has_value()) {
-            yuyvGl_->releaseFrame();
-        }
-        if (i420Gl_.has_value()) {
-            i420Gl_->releaseFrame();
-        }
+        activeGlRenderer_ = -1;
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
@@ -768,13 +770,13 @@ protected:
     void resizeEvent(QResizeEvent *event) override
     {
         QOpenGLWidget::resizeEvent(event);
+        dpr_ = static_cast<float>(devicePixelRatioF());
         updateTargetRect();
     }
 
 private:
     void paintCpuFrame(QPainter &painter)
     {
-        ++paintCount_;
         painter.fillRect(rect(), Qt::black);
         if (!frame_ || frame_->isNull()) {
             return;
@@ -799,13 +801,22 @@ private:
             sourceSize = frame_->size();
         } else {
             targetRect_ = {};
+            lastSrcSize_ = {};
             return;
         }
 
+        const QSize widgetSize = size();
+        if (sourceSize == lastSrcSize_ && widgetSize == lastWidgetSize_) {
+            return;
+        }
+        lastSrcSize_ = sourceSize;
+        lastWidgetSize_ = widgetSize;
+
         auto targetSize = sourceSize;
-        targetSize.scale(size(), Qt::KeepAspectRatio);
+        targetSize.scale(widgetSize, Qt::KeepAspectRatio);
         targetRect_ = QRect(
-            QPoint((width() - targetSize.width()) / 2, (height() - targetSize.height()) / 2),
+            QPoint((widgetSize.width() - targetSize.width()) / 2,
+                   (widgetSize.height() - targetSize.height()) / 2),
             targetSize);
     }
 
@@ -820,7 +831,7 @@ private:
             return false;
         }
 
-        const auto dpr = static_cast<float>(devicePixelRatioF());
+        const auto dpr = dpr_;
         if (dmaFrame_->layout == capture::DmaBufLayout::Nv12) {
             if (!nv12Gl_ || !nv12Gl_->isAvailable()) {
                 return false;
@@ -832,6 +843,7 @@ private:
                 }
                 boundDmaFrame_ = dmaFrame_;
             }
+            activeGlRenderer_ = 0;
             nv12Gl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
@@ -850,6 +862,7 @@ private:
                 }
                 boundDmaFrame_ = dmaFrame_;
             }
+            activeGlRenderer_ = 1;
             rgbGl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
@@ -867,6 +880,7 @@ private:
                 }
                 boundDmaFrame_ = dmaFrame_;
             }
+            activeGlRenderer_ = 2;
             yuyvGl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
@@ -885,6 +899,7 @@ private:
                 }
                 boundDmaFrame_ = dmaFrame_;
             }
+            activeGlRenderer_ = 3;
             i420Gl_->draw(size(), targetRect_, dpr);
             reportFramePresented();
             notifyFirstFramePainted();
@@ -914,6 +929,10 @@ private:
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     std::function<void()> firstFramePaintedHandler_;
     QRect targetRect_;
+    QSize lastSrcSize_;
+    QSize lastWidgetSize_;
+    float dpr_ = 1.0f;
+    int activeGlRenderer_ = -1; // 0=nv12, 1=rgb, 2=yuyv, 3=i420; -1=none
     bool firstFramePainted_ = false;
     int paintCount_ = 0;
 };
@@ -2434,8 +2453,9 @@ void MainWindow::updateStatsOverlay()
 
     if (statsOverlay_->text() != cachedStatsOverlayText_) {
         statsOverlay_->setText(cachedStatsOverlayText_);
+        const auto prevSize = statsOverlay_->size();
         statsOverlay_->adjustSize();
-        if (videoSurface_) {
+        if (videoSurface_ && statsOverlay_->size() != prevSize) {
             videoSurface_->setOverlay(statsOverlay_);
         }
     }
