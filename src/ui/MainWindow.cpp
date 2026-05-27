@@ -220,6 +220,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
+        // Synchronous present: collapse QueuedConnection delivery + paint into one UI-thread hop (lower lag than update()).
         repaint();
     }
 
@@ -399,6 +400,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
+        // Synchronous present: collapse QueuedConnection delivery + paintGL into one UI-thread hop (lower lag than update()).
         repaint();
     }
 
@@ -409,6 +411,7 @@ public:
         displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
         dmaFrame_ = std::move(frame);
         updateTargetRect();
+        // Synchronous present: collapse QueuedConnection delivery + paintGL into one UI-thread hop (lower lag than update()).
         repaint();
     }
 
@@ -802,6 +805,11 @@ public:
     void setOverlay(QWidget *overlay)
     {
         overlay_ = overlay;
+        positionOverlays();
+    }
+
+    void repositionOverlays()
+    {
         positionOverlays();
     }
 
@@ -1859,7 +1867,7 @@ void MainWindow::startPlayback()
     });
     connect(captureSession_.get(), &capture::CaptureSession::telemetryReady, this, [this](const capture::VideoTelemetrySnapshot &snapshot) {
         latestTelemetry_ = snapshot;
-        refreshStatsOverlayCache();
+        // Overlay text is refreshed on statsOverlayTimer_ only — avoid QString work on the capture telemetry path.
     });
 
     const auto deviceSnapshot = selectedDevice_;
@@ -2141,7 +2149,7 @@ void MainWindow::recordPresentLatency(const qint64 latencyNs)
     presentLagWindowStartNs_ = nowNs;
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
-    refreshStatsOverlayCache();
+    // Lag value is picked up by statsOverlayTimer_; do not format overlay strings from the video present path.
 }
 
 void MainWindow::updateStatsOverlay()
@@ -2174,22 +2182,35 @@ void MainWindow::updateStatsOverlay()
         displayPath_ = capture::VideoDisplayPath::Gpu;
     }
 
+    const auto previousCachedText = cachedStatsOverlayText_;
     refreshStatsOverlayCache();
 
     if (!showVideoStatsOverlay) {
-        statsOverlay_->hide();
+        if (statsOverlay_->isVisible()) {
+            statsOverlay_->hide();
+        }
         return;
     }
 
-    if (statsOverlay_->text() != cachedStatsOverlayText_) {
-        statsOverlay_->setText(cachedStatsOverlayText_);
-        const auto prevSize = statsOverlay_->size();
-        statsOverlay_->adjustSize();
-        if (videoSurface_ && statsOverlay_->size() != prevSize) {
-            videoSurface_->setOverlay(statsOverlay_);
+    if (cachedStatsOverlayText_ == previousCachedText && cachedStatsOverlayText_ == statsOverlay_->text()) {
+        if (!statsOverlay_->isVisible()) {
+            statsOverlay_->show();
+            statsOverlay_->update();
         }
+        return;
     }
-    statsOverlay_->show();
+
+    statsOverlay_->setText(cachedStatsOverlayText_);
+    const auto prevSize = statsOverlay_->size();
+    statsOverlay_->adjustSize();
+    if (videoSurface_ && statsOverlay_->size() != prevSize) {
+        videoSurface_->repositionOverlays();
+    }
+    if (!statsOverlay_->isVisible()) {
+        statsOverlay_->show();
+    }
+    // Deferred QLabel repaint only — never repaint() the video renderer from the stats path.
+    statsOverlay_->update();
 }
 
 void MainWindow::refreshStatsOverlayCache()
@@ -2221,7 +2242,7 @@ QString MainWindow::formatStatsOverlayText() const
         QStringLiteral("%1x%2/%3").arg(width).arg(height).arg(QString::number(configuredFps, 'f', 0)),
         pixelFormat,
         QStringLiteral("FPS:%1").arg(QString::number(latestTelemetry_.decodedFps, 'f', 0)),
-        QStringLiteral("Lag:%1").arg(QString::number(presentLagAvgMs_, 'f', 1)),
+        QStringLiteral("Lag:%1").arg(qRound(presentLagAvgMs_)),
         QStringLiteral("Mem:%1").arg(frameMemory),
         QStringLiteral("Disp:%1").arg(capture::displayPathLabel(displayPath_)),
     };
