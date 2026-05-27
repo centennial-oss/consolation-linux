@@ -1,13 +1,18 @@
-# <img src="assets/app-icon.png" alt="Consolation" height="48" /> Consolation™
+# <img src="assets/icons/app-icon.png" alt="Consolation" height="48" /> Consolation™
 
 
 A 100% free, no-frills, incredibly performant video capture viewer for Linux with no analytics or snooping.
 
-Release builds are coming soon!
+Installers are available for the following platforms in the Releases:
+ * Fedora 44 (x86_64 and aarch64)
+ * Fedora 42 (x86_64 and aarch64)
+ * Ubuntu 24.04 (amd64 and arm64)
+ * Ubuntu 26.04 (amd64 and arm64)
+ * Raspberry Pi OS Trixie
 
 ## About
 
-Consolation is a free app that enables your Linux workstation to be used as a display for devices like gaming consoles, Raspberry Pis, and even a Mac mini or other PC, via a standard USB Video Class (UVC) video capture card.
+Consolation is a free app that enables your Linux workstation or RPi to be used as a display for devices like gaming consoles, other Raspberry Pis, and even a Mac mini, Linux or Windows PC, via a standard USB Video Class (UVC) video capture card.
 
 The app is intentionally simple: watch the live video on your computer. No recording or saving, no streaming to the internet. Just plug and play, privately with no ads or tracking. Consolation will never make an outbound network request or listen for inbound network connections.
 
@@ -36,12 +41,21 @@ Linux capture device testing is in progress. The other Consolation ports have be
 - PERESAL USB 3.0 Video Capture Card with PD 100W - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
+## TODO
+
+- Automate release builds via GitHub Workflow
+- Support Full Screen Mode (currently supports Windowed/Maximized)
+- Support Stay-on-Top
+- Support GUI Menu Icons to launch the App (currently must launch from terminal or Run dialog)
+
 ## Requirements
 
 ### Running
 
 - A modern Linux distribution, recent as of January 2025, with support for Qt 6 and V4L2
 - A UVC-compliant video capture card
+
+`deb` and `rpm` installers place the binary in`/usr/bin/consolation`. It is recommended to run as an unprivileged user.
 
 ### Developer
 
@@ -51,12 +65,10 @@ Linux capture device testing is in progress. The other Consolation ports have be
 
 See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands.
 
-## Building
+#### Building
 
 ```sh
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+make build-linux for a local build
 ```
 
 ## Contributor Disclosure
