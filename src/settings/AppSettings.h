@@ -37,6 +37,9 @@ public:
     [[nodiscard]] bool flipVertical() const;
     void setFlipVertical(bool enabled);
 
+    [[nodiscard]] bool disableGpu() const;
+    void setDisableGpu(bool enabled);
+
 private:
     QSettings settings_;
 };

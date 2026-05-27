@@ -1732,6 +1732,7 @@ MainWindow::MainWindow(QWidget *parent)
     rotationDegrees_ = settings_.rotationDegrees();
     flipHorizontal_ = settings_.flipHorizontal();
     flipVertical_ = settings_.flipVertical();
+    disableGpu_ = settings_.disableGpu();
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -2200,6 +2201,7 @@ void MainWindow::startPlayback()
     const auto deviceSnapshot = selectedDevice_;
     const auto formatSnapshot = selectedFormat_;
     const auto dmaDisplayRequested = deviceSnapshot.backend == capture::CaptureBackend::V4L2 &&
+        !disableGpu_ &&
         pixelFormatSupportsDmaDisplay(formatSnapshot.pixelFormat) && canCreateOpenGLContext();
     if (auto *v4l2 = dynamic_cast<platform::linux::V4L2CaptureSession *>(captureSession_.get())) {
         v4l2->setDmaBufDisplayRequested(dmaDisplayRequested);
@@ -3016,6 +3018,14 @@ void MainWindow::showSettingsDialog()
     flipRow->addStretch();
     layout->addLayout(flipRow);
 
+    layout->addWidget(makeDivider(&dialog));
+    auto *graphicsLabel = new QLabel(QStringLiteral("Graphics"), &dialog);
+    graphicsLabel->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700;"));
+    layout->addWidget(graphicsLabel);
+    auto *disableGpuToggle = new QCheckBox(QStringLiteral("Disable GPU (use MMAP/CPU)"), &dialog);
+    disableGpuToggle->setChecked(disableGpu_);
+    layout->addWidget(disableGpuToggle);
+
     connect(statsGroup, &QButtonGroup::idClicked, this, [this, debugToggle](const int id) {
         statsOverlayPosition_ = static_cast<StatsOverlayPosition>(id);
         settings_.setStatsPosition(id);
@@ -3051,6 +3061,10 @@ void MainWindow::showSettingsDialog()
         flipVertical_ = checked;
         settings_.setFlipVertical(checked);
         applyPlaybackViewSettings();
+    });
+    connect(disableGpuToggle, &QCheckBox::toggled, this, [this](const bool checked) {
+        disableGpu_ = checked;
+        settings_.setDisableGpu(checked);
     });
 
     layout->addWidget(makeDivider(&dialog));

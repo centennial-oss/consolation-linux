@@ -15,6 +15,7 @@ constexpr auto debugStatsEnabledKey = "playback/debugStatsEnabled";
 constexpr auto rotationDegreesKey = "playback/rotationDegrees";
 constexpr auto flipHorizontalKey = "playback/flipHorizontal";
 constexpr auto flipVerticalKey = "playback/flipVertical";
+constexpr auto disableGpuKey = "playback/disableGpu";
 } // namespace
 
 AppSettings::AppSettings()
@@ -127,6 +128,16 @@ bool AppSettings::flipVertical() const
 void AppSettings::setFlipVertical(const bool enabled)
 {
     settings_.setValue(flipVerticalKey, enabled);
+}
+
+bool AppSettings::disableGpu() const
+{
+    return settings_.value(disableGpuKey, false).toBool();
+}
+
+void AppSettings::setDisableGpu(const bool enabled)
+{
+    settings_.setValue(disableGpuKey, enabled);
 }
 
 } // namespace consolation::settings

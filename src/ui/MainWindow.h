@@ -95,6 +95,7 @@ private:
     int rotationDegrees_ = 0;
     bool flipHorizontal_ = false;
     bool flipVertical_ = false;
+    bool disableGpu_ = false;
     int zoomPercent_ = 0;
     qint64 lowFpsBelowThresholdSinceMs_ = 0;
     qint64 lowFpsRecoveredSinceMs_ = 0;
