@@ -71,6 +71,7 @@ double timePerFrameToFps(const v4l2_fract &timePerFrame)
 
 V4L2CaptureSession::V4L2CaptureSession(QObject *parent)
     : capture::CaptureSession(parent)
+    , requeuePending_(std::make_shared<std::atomic<uint64_t>>(0))
 {
 }
 
@@ -86,6 +87,7 @@ bool V4L2CaptureSession::start(const capture::CaptureDevice &device, const captu
     dmaBufDisplayRequested_.store(requestedDmaBufDisplay);
     dmaBufHandleFailureLogged_ = false;
     dmaBufWarmupSkipLogged_ = false;
+    requeuePending_ = std::make_shared<std::atomic<uint64_t>>(0);
 
     constexpr int maxAttempts = 3;
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
@@ -384,6 +386,9 @@ bool V4L2CaptureSession::queueBuffers()
 
 void V4L2CaptureSession::handleReadyRead()
 {
+    // Return any buffers that were released by the UI thread since the last wakeup.
+    drainRequeuePending();
+
     // Drain every frame queued by the driver this wakeup, but decode/emit only the newest.
     // Older buffers are requeued without decode to avoid redundant work and signal backlog.
     auto havePending = false;
@@ -835,20 +840,26 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
         return {};
     }
 
+    // The deleter sets a bit in the atomic bitmask so handleReadyRead() can drain all pending
+    // requeues in one pass. When the bitmask transitions empty→non-empty we also post a
+    // QueuedConnection event so the capture thread wakes up even if no V4L2 frames are arriving
+    // (which would otherwise deadlock if all buffers were simultaneously pending requeue).
+    auto pending = requeuePending_;
+    const auto bufferIndex = static_cast<int>(buffer.index);
     const QPointer<V4L2CaptureSession> session(this);
-    return capture::DmaBufFrameHandle(payload, [session](capture::DmaBufFrame *frame) {
-        if (frame != nullptr) {
-            const auto index = frame->bufferIndex;
-            if (session != nullptr) {
-                QMetaObject::invokeMethod(
-                    session,
-                    "requeueCaptureBuffer",
-                    Qt::QueuedConnection,
-                    Q_ARG(int, index));
-            }
+    return capture::DmaBufFrameHandle(payload,
+        [pending = std::move(pending), bufferIndex, session](capture::DmaBufFrame *frame) {
             delete frame;
-        }
-    });
+            const auto prev = pending->fetch_or(uint64_t{1} << bufferIndex, std::memory_order_release);
+            if (prev == 0 && session) {
+                // First bit in this batch — wake the capture thread so it calls drainRequeuePending().
+                QMetaObject::invokeMethod(session.data(), [session]() {
+                    if (session) {
+                        session->drainRequeuePending();
+                    }
+                }, Qt::QueuedConnection);
+            }
+        });
 }
 
 void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
@@ -880,6 +891,18 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
     if (cpuFrame && !cpuFrame->isNull()) {
         recordDecodedFrame(bytesUsed, decodeNs, false);
         emit frameReady(std::move(cpuFrame), capturedAtNs);
+    }
+}
+
+void V4L2CaptureSession::drainRequeuePending()
+{
+    // Atomically take all pending bits, then requeue each flagged buffer.
+    // Called at the top of handleReadyRead() on the capture thread.
+    auto mask = requeuePending_->exchange(0, std::memory_order_acquire);
+    while (mask != 0) {
+        const int index = __builtin_ctzll(mask); // index of lowest set bit
+        mask &= mask - 1;                         // clear lowest set bit
+        requeueCaptureBuffer(index);
     }
 }
 

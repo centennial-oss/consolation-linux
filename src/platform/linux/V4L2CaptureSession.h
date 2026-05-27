@@ -8,6 +8,7 @@
 #include <linux/videodev2.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -36,8 +37,9 @@ private:
     };
 
     void handleReadyRead();
+    void drainRequeuePending();
     [[nodiscard]] capture::DmaBufFrameHandle makeDmaBufFrameHandle(const v4l2_buffer &buffer);
-    Q_INVOKABLE void requeueCaptureBuffer(int bufferIndex);
+    void requeueCaptureBuffer(int bufferIndex);
     [[nodiscard]] bool useDmaBufDisplayPath() const;
     [[nodiscard]] static bool pixelFormatSupportsDmaBufDisplay(quint32 pixelFormat);
     [[nodiscard]] bool configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format);
@@ -68,6 +70,7 @@ private:
     bool dmaBufExportSupported_ = false;
     bool dmaBufDisplayEnabled_ = false;
     std::atomic<bool> dmaBufDisplayRequested_ { false };
+    std::shared_ptr<std::atomic<uint64_t>> requeuePending_;
     qint64 telemetryWindowStartNs_ = 0;
     int telemetryFrameCount_ = 0;
     qint64 telemetryDecodeTotalNs_ = 0;
