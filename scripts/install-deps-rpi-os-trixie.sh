@@ -30,14 +30,14 @@ packages=(
   cmake
   libegl-dev
   libgl-dev
-  libjpeg-turbo8-dev
+  libjpeg62-turbo-dev
   libpipewire-0.3-dev
   libxkbcommon-dev
   ninja-build
   pkg-config
   qt6-base-dev
   qt6-base-dev-tools
-  libqt6svg6-dev
+  qt6-svg-dev
 )
 
 if [[ "$with_packaging" == "true" ]]; then
