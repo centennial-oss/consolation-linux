@@ -1848,9 +1848,6 @@ MainWindow::MainWindow(QWidget *parent)
     qRegisterMetaType<capture::VideoTelemetrySnapshot>("consolation::capture::VideoTelemetrySnapshot");
     qRegisterMetaType<capture::DmaBufFrameHandle>("consolation::capture::DmaBufFrameHandle");
 
-    setWindowTitle(QStringLiteral("%1 %2").arg(
-        QString::fromUtf8(consolation::app::AppMetadata::displayName),
-        QString::fromUtf8(consolation::app::BuildInfo::releaseVersion)));
     setWindowIcon(createAppIcon());
     resize(1200, 760);
     setMinimumSize(820, 520);

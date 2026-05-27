@@ -21,7 +21,7 @@ struct BuildInfo {
             "Git Commit: %6")
             .arg(
                 QString::fromUtf8(releaseVersion),
-                QStringLiteral("%1 (%2)")
+                QStringLiteral("%1, %2")
                     .arg(QString::fromUtf8(buildPlatform), QString::fromUtf8(buildArchitecture)),
                 QString::fromUtf8(buildDate),
                 QString::fromUtf8(buildPlatform),
