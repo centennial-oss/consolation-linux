@@ -111,7 +111,10 @@ target_link_libraries(consolation
         Qt6::Svg
         Qt6::Widgets
         PkgConfig::PIPEWIRE
+        yuv
 )
+
+target_include_directories(consolation PRIVATE third_party/libyuv/include)
 
 set_target_properties(consolation PROPERTIES
     OUTPUT_NAME "consolation"

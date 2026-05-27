@@ -80,7 +80,63 @@
 #include <set>
 #include <vector>
 
+#include <libyuv/scale_argb.h>
+
 namespace consolation::ui {
+
+// Pre-scale letterboxed CPU frames once per frame (libyuv), not on every QPainter::drawImage.
+struct CpuFrameScaleCache final {
+    void prepare(const QImage &source, const QRect &targetRect)
+    {
+        useScaled_ = false;
+        if (source.isNull() || targetRect.isEmpty()) {
+            scaled_ = {};
+            return;
+        }
+
+        const auto targetSize = targetRect.size();
+        if (targetSize.width() <= 0 || targetSize.height() <= 0) {
+            return;
+        }
+        if (targetSize == source.size()) {
+            scaled_ = {};
+            return;
+        }
+
+        if (scaled_.size() != targetSize || scaled_.format() != QImage::Format_RGB32) {
+            scaled_ = QImage(targetSize, QImage::Format_RGB32);
+        }
+
+        const auto result = libyuv::ARGBScale(
+            source.constBits(),
+            source.bytesPerLine(),
+            source.width(),
+            source.height(),
+            scaled_.bits(),
+            scaled_.bytesPerLine(),
+            targetSize.width(),
+            targetSize.height(),
+            libyuv::kFilterBox);
+        if (result != 0) {
+            scaled_ = source.scaled(targetSize, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+        }
+        useScaled_ = true;
+    }
+
+    void paint(QPainter &painter, const QRect &targetRect, const QImage &source) const
+    {
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        if (useScaled_ && !scaled_.isNull()) {
+            painter.drawImage(targetRect.topLeft(), scaled_);
+            return;
+        }
+        painter.drawImage(targetRect.topLeft(), source);
+    }
+
+private:
+    QImage scaled_;
+    bool useScaled_ = false;
+};
 
 class ScreenInhibitor final {
 public:
@@ -220,6 +276,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
+        refreshCpuScaleCache();
         // Synchronous present: collapse QueuedConnection delivery + paint into one UI-thread hop (lower lag than update()).
         repaint();
     }
@@ -244,6 +301,7 @@ protected:
     {
         QWidget::resizeEvent(event);
         updateTargetRect();
+        refreshCpuScaleCache();
     }
 
 private:
@@ -261,6 +319,13 @@ private:
             targetSize);
     }
 
+    void refreshCpuScaleCache()
+    {
+        if (frame_ && !frame_->isNull()) {
+            cpuScale_.prepare(*frame_, targetRect_);
+        }
+    }
+
     void paintFrame(QPainter &painter)
     {
         ++paintCount_;
@@ -269,12 +334,7 @@ private:
             return;
         }
 
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_->size()) {
-            painter.drawImage(targetRect_.topLeft(), *frame_);
-        } else {
-            painter.drawImage(targetRect_, *frame_);
-        }
+        cpuScale_.paint(painter, targetRect_, *frame_);
         reportFramePresented();
         notifyFirstFramePainted();
     }
@@ -290,6 +350,7 @@ private:
 
     capture::FrameHandle frame_;
     QRect targetRect_;
+    CpuFrameScaleCache cpuScale_;
     std::function<void()> firstFramePaintedHandler_;
     bool firstFramePainted_ = false;
     int paintCount_ = 0;
@@ -400,6 +461,7 @@ public:
         displayCapturedAtNs_ = capturedAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
+        refreshCpuScaleCache();
         // Synchronous present: collapse QueuedConnection delivery + paintGL into one UI-thread hop (lower lag than update()).
         repaint();
     }
@@ -504,9 +566,17 @@ protected:
         QOpenGLWidget::resizeEvent(event);
         dpr_ = static_cast<float>(devicePixelRatioF());
         updateTargetRect();
+        refreshCpuScaleCache();
     }
 
 private:
+    void refreshCpuScaleCache()
+    {
+        if (frame_ && !frame_->isNull()) {
+            cpuScale_.prepare(*frame_, targetRect_);
+        }
+    }
+
     void paintCpuFrame(QPainter &painter)
     {
         painter.fillRect(rect(), Qt::black);
@@ -514,12 +584,7 @@ private:
             return;
         }
 
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        if (targetRect_.size() == frame_->size()) {
-            painter.drawImage(targetRect_.topLeft(), *frame_);
-        } else {
-            painter.drawImage(targetRect_, *frame_);
-        }
+        cpuScale_.paint(painter, targetRect_, *frame_);
         reportFramePresented();
         notifyFirstFramePainted();
     }
@@ -730,6 +795,7 @@ private:
     std::optional<platform::linux::I420DmaBufGl> i420Gl_;
     capture::FrameHandle frame_;
     capture::DmaBufFrameHandle dmaFrame_;
+    CpuFrameScaleCache cpuScale_;
     int boundDmaBufferIndex_ = -1;
     int boundDmaFd_ = -1;
     capture::DmaBufLayout boundDmaLayout_ = capture::DmaBufLayout::Unknown;
