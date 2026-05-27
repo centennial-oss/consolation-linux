@@ -1,5 +1,7 @@
 #include "settings/AppSettings.h"
 
+#include "audio/AudioDefaults.h"
+
 #include <algorithm>
 
 namespace consolation::settings {
@@ -7,7 +9,6 @@ namespace consolation::settings {
 namespace {
 constexpr auto volumePercentKey = "playback/volumePercent";
 constexpr auto lastSelectedDeviceIdKey = "capture/lastSelectedDeviceId";
-constexpr auto defaultVolumePercent = 100;
 } // namespace
 
 AppSettings::AppSettings()
@@ -15,9 +16,17 @@ AppSettings::AppSettings()
 {
 }
 
+AppSettings::AppSettings(const QString &settingsFilePath)
+    : settings_(settingsFilePath, QSettings::IniFormat)
+{
+}
+
 int AppSettings::volumePercent() const
 {
-    const auto value = settings_.value(volumePercentKey, defaultVolumePercent).toInt();
+    if (!settings_.contains(volumePercentKey)) {
+        return audio::defaultPlaybackVolumePercent;
+    }
+    const auto value = settings_.value(volumePercentKey).toInt();
     return std::clamp(value, 0, 100);
 }
 

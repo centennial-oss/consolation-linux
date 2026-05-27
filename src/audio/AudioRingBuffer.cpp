@@ -1,9 +1,16 @@
 #include "audio/AudioRingBuffer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace consolation::audio {
+
+namespace {
+
+constexpr float unityGainEpsilon = 0.000'1F;
+
+} // namespace
 
 AudioRingBuffer::AudioRingBuffer(const size_t capacityFrames, const int channels)
     : capacityFrames_(capacityFrames)
@@ -67,6 +74,7 @@ size_t AudioRingBuffer::read(float *samples, const size_t frames, const float ga
     auto readFrame = readFrame_.load(std::memory_order_relaxed);
     const auto writeFrame = writeFrame_.load(std::memory_order_acquire);
     const auto readableFrames = std::min(frames, writeFrame - readFrame);
+    const auto unityGain = std::fabs(gain - 1.0F) <= unityGainEpsilon;
 
     auto remaining = readableFrames;
     auto *destination = samples;
@@ -75,8 +83,12 @@ size_t AudioRingBuffer::read(float *samples, const size_t frames, const float ga
         const auto contiguous = std::min(remaining, capacityFrames_ - offset);
         const auto sampleCount = contiguous * static_cast<size_t>(channels_);
         const auto *source = samples_.data() + offset * static_cast<size_t>(channels_);
-        for (auto index = 0U; index < sampleCount; ++index) {
-            destination[index] = source[index] * gain;
+        if (unityGain) {
+            std::memcpy(destination, source, sampleCount * sizeof(float));
+        } else {
+            for (auto index = 0U; index < sampleCount; ++index) {
+                destination[index] = source[index] * gain;
+            }
         }
         destination += sampleCount;
         readFrame += contiguous;
