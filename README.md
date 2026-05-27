@@ -67,9 +67,13 @@ See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands.
 
 #### Building
 
+For a local dev build, run:
+
 ```sh
-make build-linux for a local build
+make build-linux
 ```
+
+See the Makefile for release build targets.
 
 ## Contributor Disclosure
 
