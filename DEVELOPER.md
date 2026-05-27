@@ -10,6 +10,7 @@ Install the dependencies needed to configure, build, and test the app:
 sudo dnf install \
   cmake \
   gcc-c++ \
+  libjpeg-turbo-devel \
   ninja-build \
   pipewire-devel \
   qt6-qtbase-devel \
@@ -104,12 +105,11 @@ ctest --preset rpi-os-trixie
 
 Qt OpenGL Widgets is provided by `qt6-base-dev` on Debian/Raspberry Pi OS, so no separate OpenGL Widgets development package is needed.
 
-ALSA and MJPEG decoder work use these additional development packages:
+ALSA and system integration work may use these additional development packages:
 
 ```sh
 sudo dnf install \
   alsa-lib-devel \
-  libjpeg-turbo-devel \
   systemd-devel
 ```
 

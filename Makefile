@@ -4,9 +4,17 @@ LINUX_BUILD_DIR ?= build-linux-default
 CMAKE_GENERATOR ?=
 CMAKE_CONFIGURE_FLAGS ?=
 CMAKE_GENERATOR_FLAG = $(if $(CMAKE_GENERATOR),-G "$(CMAKE_GENERATOR)",)
-PACKAGE_VERSION ?= 0.1.0
+RELEASE_VERSION ?= localdev
+BUILD_INFO_FILE ?= src/app/BuildInfo.h
+BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+GIT_COMMIT ?= $(shell if command -v git >/dev/null 2>&1; then git rev-parse HEAD; else echo localdev; fi)
+BUILD_PLATFORM ?= Linux
+BUILD_ARCHITECTURE ?= localdev
+SET_BUILD_INFO_SCRIPT := scripts/set-build-info.sh
 
 .PHONY: \
+	set-release-version-info \
+	clear-version-info \
 	sync-linux \
 	build-linux \
 	test-linux \
@@ -51,21 +59,39 @@ test-linux: build-linux
 run-headless: build-linux
 	ssh $(LINUX_HOST) 'cd $(LINUX_DIR) && ./$(LINUX_BUILD_DIR)/headless_capture $(HEADLESS_ARGS)'
 
+set-release-version-info:
+	bash $(SET_BUILD_INFO_SCRIPT) --path "$(BUILD_INFO_FILE)" --version "$(RELEASE_VERSION)" --build-date "$(BUILD_DATE)" --build-platform "$(BUILD_PLATFORM)" --build-architecture "$(BUILD_ARCHITECTURE)" --git-commit "$(GIT_COMMIT)"
+
+clear-version-info:
+	bash $(SET_BUILD_INFO_SCRIPT) --path "$(BUILD_INFO_FILE)"
+
 build-fedora-44: build-fedora-44-amd64 build-fedora-44-arm64
 
-build-fedora-44-amd64: build-fedora-44-binary
-	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=x86_64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(PACKAGE_VERSION)-fedora-44-x86_64
+build-fedora-44-amd64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
+	$(MAKE) build-fedora-44-binary; \
+	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=x86_64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-x86_64
 
-build-fedora-44-arm64: build-fedora-44-binary
-	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=aarch64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(PACKAGE_VERSION)-fedora-44-aarch64
+build-fedora-44-arm64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=aarch64; \
+	$(MAKE) build-fedora-44-binary; \
+	cd build-fedora-44 && cpack -G RPM -D CPACK_RPM_PACKAGE_ARCHITECTURE=aarch64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-fedora-44-aarch64
 
 build-ubuntu-24-04: build-ubuntu-24-04-amd64 build-ubuntu-24-04-arm64
 
-build-ubuntu-24-04-amd64: build-ubuntu-24-04-binary
-	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(PACKAGE_VERSION)-ubuntu-24.04-amd64
+build-ubuntu-24-04-amd64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
+	$(MAKE) build-ubuntu-24-04-binary; \
+	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-amd64
 
-build-ubuntu-24-04-arm64: build-ubuntu-24-04-binary
-	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(PACKAGE_VERSION)-ubuntu-24.04-arm64
+build-ubuntu-24-04-arm64:
+	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
+	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=arm64; \
+	$(MAKE) build-ubuntu-24-04-binary; \
+	cd build-ubuntu-2404 && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-24.04-arm64
 
 build-linux-ubuntu-2404: build-ubuntu-24-04-binary
 
