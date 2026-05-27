@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cerrno>
 
 #include <fcntl.h>
@@ -15,20 +16,43 @@
 
 namespace consolation::platform::linux {
 
+enum class DmaBufSyncSupport {
+    Unknown,
+    Supported,
+    Unsupported,
+};
+
+inline std::atomic<DmaBufSyncSupport> &dmaBufSyncSupport()
+{
+    static std::atomic<DmaBufSyncSupport> support { DmaBufSyncSupport::Unknown };
+    return support;
+}
+
 inline bool dmaBufSync(const int fd, const unsigned int flags)
 {
     if (fd < 0) {
         return false;
     }
 
+    auto &support = dmaBufSyncSupport();
+    if (support.load(std::memory_order_relaxed) == DmaBufSyncSupport::Unsupported) {
+        return true;
+    }
+
     dma_buf_sync sync {};
     sync.flags = flags;
     if (::ioctl(fd, DMA_BUF_SYNC_IOCTL, &sync) == 0) {
+        support.store(DmaBufSyncSupport::Supported, std::memory_order_relaxed);
         return true;
     }
 
     // Some exporters/drivers do not implement sync; treat as optional.
-    return errno == ENOTTY || errno == EINVAL || errno == EOPNOTSUPP;
+    if (errno == ENOTTY || errno == EINVAL || errno == EOPNOTSUPP) {
+        support.store(DmaBufSyncSupport::Unsupported, std::memory_order_relaxed);
+        return true;
+    }
+
+    return false;
 }
 
 inline bool dmaBufSyncStartRead(const int fd)

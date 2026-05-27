@@ -5,11 +5,16 @@
 #include "ui/MainWindow.h"
 
 #include <QApplication>
+#include <QSurfaceFormat>
 
 int main(int argc, char *argv[])
 {
     qRegisterMetaType<consolation::capture::FrameHandle>();
     qRegisterMetaType<consolation::capture::DmaBufFrameHandle>();
+
+    auto surfaceFormat = QSurfaceFormat::defaultFormat();
+    surfaceFormat.setSwapInterval(0);
+    QSurfaceFormat::setDefaultFormat(surfaceFormat);
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(consolation::app::AppMetadata::displayName);
