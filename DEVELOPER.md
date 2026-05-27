@@ -2,6 +2,25 @@
 
 Consolation for Linux is a Qt 6/C++20 application. Development builds require Qt Base, Qt OpenGL Widgets, Qt SVG, PipeWire, CMake, and a C++ compiler. The video capture path talks directly to V4L2 with Linux ioctls; audio capture/playback uses PipeWire.
 
+## Bootstrap Scripts
+
+Use these helper scripts to install distro-specific dependencies from this document.
+For CI/CD packaging builds, prefer version-pinned scripts:
+
+```sh
+scripts/install-deps-fedora-42.sh
+scripts/install-deps-fedora-44.sh
+scripts/install-deps-ubuntu-24-04.sh
+scripts/install-deps-ubuntu-26-04.sh
+scripts/install-deps-rpi-os-trixie.sh
+```
+
+To include packaging dependencies (`rpm-build` or `dpkg-dev`), pass `--with-packaging`:
+
+```sh
+scripts/install-deps-fedora-44.sh --with-packaging
+```
+
 ## Fedora / Asahi Linux
 
 Install the dependencies needed to configure, build, and test the app:
