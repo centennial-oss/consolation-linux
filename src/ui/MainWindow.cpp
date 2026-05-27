@@ -1559,14 +1559,143 @@ int pixelFormatPreference(const QString &pixelFormat)
     return 5;
 }
 
-bool formatIsPreferredDefault(const capture::CaptureFormat &format)
+QString formatPreferenceKey(const capture::CaptureFormat &format)
 {
-    return format.width == 1920 &&
-        format.height == 1080 &&
-        std::abs(format.framesPerSecond - 60.0) <= 0.5 &&
-        (format.pixelFormat == QStringLiteral("NV12") ||
-         format.pixelFormat == QStringLiteral("YUYV") ||
-         format.pixelFormat == QStringLiteral("YUY2"));
+    return QStringLiteral("%1x%2|%3|%4")
+        .arg(format.width)
+        .arg(format.height)
+        .arg(static_cast<int>(std::round(format.framesPerSecond * 1000.0)))
+        .arg(format.pixelFormat.toUpper());
+}
+
+QString preferredDeviceId(const capture::CaptureDevice &device)
+{
+    if (!device.stableId.isEmpty()) {
+        return device.stableId;
+    }
+    return device.devicePath;
+}
+
+bool isAutoResolutionCandidate(const int width, const int height)
+{
+    return (width == 2560 && height == 1440) ||
+        (width == 1920 && height == 1080) ||
+        (width == 1280 && height == 720);
+}
+
+int autoResolutionPriority(const int width, const int height)
+{
+    if (width == 2560 && height == 1440) {
+        return 0;
+    }
+    if (width == 1920 && height == 1080) {
+        return 1;
+    }
+    if (width == 1280 && height == 720) {
+        return 2;
+    }
+    return 3;
+}
+
+int autoPixelFormatPreference(const QString &pixelFormat)
+{
+    const auto upper = pixelFormat.toUpper();
+    if (upper == QStringLiteral("NV12")) {
+        return 0;
+    }
+    if (upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") || upper == QStringLiteral("YV12")) {
+        return 1;
+    }
+    if (upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2")) {
+        return 2;
+    }
+    if (upper == QStringLiteral("BGR3") || upper == QStringLiteral("RGB3") ||
+        upper == QStringLiteral("BGR24") || upper == QStringLiteral("RGB24")) {
+        return 3;
+    }
+    if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
+        return 4;
+    }
+    return 99;
+}
+
+int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
+{
+    if (formats.empty()) {
+        return -1;
+    }
+
+    const std::array<double, 3> preferredFps {60.0, 50.0, 30.0};
+    for (const auto targetFps : preferredFps) {
+        int bestIndex = -1;
+        for (auto i = 0; i < static_cast<int>(formats.size()); ++i) {
+            const auto &format = formats[i];
+            if (!isAutoResolutionCandidate(format.width, format.height)) {
+                continue;
+            }
+            if (std::abs(format.framesPerSecond - targetFps) > 0.6) {
+                continue;
+            }
+            const auto pref = autoPixelFormatPreference(format.pixelFormat);
+            if (pref >= 99) {
+                continue;
+            }
+            if (bestIndex < 0) {
+                bestIndex = i;
+                continue;
+            }
+            const auto &best = formats[bestIndex];
+            const auto resPriority = autoResolutionPriority(format.width, format.height);
+            const auto bestResPriority = autoResolutionPriority(best.width, best.height);
+            if (resPriority != bestResPriority) {
+                if (resPriority < bestResPriority) {
+                    bestIndex = i;
+                }
+                continue;
+            }
+            const auto bestPref = autoPixelFormatPreference(best.pixelFormat);
+            if (pref != bestPref) {
+                if (pref < bestPref) {
+                    bestIndex = i;
+                }
+                continue;
+            }
+            if (format.framesPerSecond > best.framesPerSecond) {
+                bestIndex = i;
+            }
+        }
+        if (bestIndex >= 0) {
+            return bestIndex;
+        }
+    }
+
+    int bestKnown = -1;
+    int bestAny = 0;
+    for (auto i = 0; i < static_cast<int>(formats.size()); ++i) {
+        const auto &format = formats[i];
+        const auto pref = autoPixelFormatPreference(format.pixelFormat);
+        if (pref < 99) {
+            if (bestKnown < 0) {
+                bestKnown = i;
+            } else {
+                const auto &best = formats[bestKnown];
+                const auto area = format.width * format.height;
+                const auto bestArea = best.width * best.height;
+                if (area != bestArea ? area > bestArea
+                                     : (format.framesPerSecond != best.framesPerSecond ? format.framesPerSecond > best.framesPerSecond
+                                                                                       : pref < autoPixelFormatPreference(best.pixelFormat))) {
+                    bestKnown = i;
+                }
+            }
+        }
+        const auto &best = formats[bestAny];
+        const auto area = format.width * format.height;
+        const auto bestArea = best.width * best.height;
+        if (area != bestArea ? area > bestArea : format.framesPerSecond > best.framesPerSecond) {
+            bestAny = i;
+        }
+    }
+    return bestKnown >= 0 ? bestKnown : bestAny;
 }
 
 QString formatLeafLabel(const capture::CaptureFormat &format)
@@ -1897,7 +2026,7 @@ void MainWindow::buildStoppedState()
         playButton->setEnabled(false);
         startPlayback();
     });
-    const auto selectFormat = [this, formatButton, playButton](const int formatIndex) {
+    const auto selectFormat = [this, formatButton, playButton](const int formatIndex, const bool persistPreference) {
         if (selectedDevice_.devicePath.isEmpty() ||
             formatIndex < 0 ||
             formatIndex >= static_cast<int>(selectedDevice_.formats.size())) {
@@ -1908,6 +2037,11 @@ void MainWindow::buildStoppedState()
         }
 
         selectedFormat_ = selectedDevice_.formats[formatIndex];
+        if (persistPreference) {
+            settings_.setPreferredRffKeyForDevice(
+                preferredDeviceId(selectedDevice_),
+                formatPreferenceKey(selectedFormat_));
+        }
         formatButton->setText(selectedFormat_.label);
         playButton->setEnabled(true);
         QTimer::singleShot(0, this, [this]() { preconfigureSelectedFormat(); });
@@ -1960,7 +2094,6 @@ void MainWindow::buildStoppedState()
         });
 
         auto addedDivider = false;
-        auto defaultFormatIndex = -1;
         for (const auto &[width, height] : resolutions) {
             if (!addedDivider && resolutionPreferenceIndex(width, height) < 0 && !menu->isEmpty()) {
                 menu->addSeparator();
@@ -1979,12 +2112,6 @@ void MainWindow::buildStoppedState()
                 const auto fpsKey = static_cast<int>(std::round(format.framesPerSecond * 1000.0));
                 if (seenFrameRates.insert(fpsKey).second) {
                     frameRateKeys.push_back(fpsKey);
-                }
-                if ((defaultFormatIndex < 0 && formatIsPreferredDefault(format)) ||
-                    (defaultFormatIndex >= 0 &&
-                     formatIsPreferredDefault(format) &&
-                     pixelFormatPreference(format.pixelFormat) < pixelFormatPreference(selectedDevice_.formats[defaultFormatIndex].pixelFormat))) {
-                    defaultFormatIndex = formatIndex;
                 }
             }
             std::sort(frameRateKeys.begin(), frameRateKeys.end(), std::greater<>());
@@ -2015,13 +2142,23 @@ void MainWindow::buildStoppedState()
 
                 for (const auto formatIndex : formatIndices) {
                     auto *action = frameRateMenu->addAction(formatLeafLabel(selectedDevice_.formats[formatIndex]));
-                    connect(action, &QAction::triggered, this, [selectFormat, formatIndex]() { selectFormat(formatIndex); });
+                    connect(action, &QAction::triggered, this, [selectFormat, formatIndex]() { selectFormat(formatIndex, true); });
                 }
             }
         }
 
-        if (defaultFormatIndex < 0 && !selectedDevice_.formats.empty()) {
-            defaultFormatIndex = 0;
+        auto defaultFormatIndex = -1;
+        const auto preferredKey = settings_.preferredRffKeyForDevice(preferredDeviceId(selectedDevice_));
+        if (!preferredKey.isEmpty()) {
+            for (auto formatIndex = 0; formatIndex < static_cast<int>(selectedDevice_.formats.size()); ++formatIndex) {
+                if (formatPreferenceKey(selectedDevice_.formats[formatIndex]) == preferredKey) {
+                    defaultFormatIndex = formatIndex;
+                    break;
+                }
+            }
+        }
+        if (defaultFormatIndex < 0) {
+            defaultFormatIndex = chooseAutoFormatIndex(selectedDevice_.formats);
         }
 
         if (auto *oldMenu = formatButton->menu(); oldMenu != nullptr) {
@@ -2030,7 +2167,7 @@ void MainWindow::buildStoppedState()
         }
         formatButton->setMenu(menu);
         if (defaultFormatIndex >= 0) {
-            selectFormat(defaultFormatIndex);
+            selectFormat(defaultFormatIndex, false);
         } else {
             formatButton->setText(QStringLiteral("No Formats Advertised"));
             formatButton->setEnabled(false);

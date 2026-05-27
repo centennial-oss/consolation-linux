@@ -40,6 +40,9 @@ public:
     [[nodiscard]] bool disableGpu() const;
     void setDisableGpu(bool enabled);
 
+    [[nodiscard]] QString preferredRffKeyForDevice(const QString &deviceId) const;
+    void setPreferredRffKeyForDevice(const QString &deviceId, const QString &rffKey);
+
 private:
     QSettings settings_;
 };

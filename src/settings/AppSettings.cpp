@@ -16,6 +16,7 @@ constexpr auto rotationDegreesKey = "playback/rotationDegrees";
 constexpr auto flipHorizontalKey = "playback/flipHorizontal";
 constexpr auto flipVerticalKey = "playback/flipVertical";
 constexpr auto disableGpuKey = "playback/disableGpu";
+constexpr auto preferredRffByDevicePrefix = "capture/preferredRffByDevice/";
 } // namespace
 
 AppSettings::AppSettings()
@@ -138,6 +139,22 @@ bool AppSettings::disableGpu() const
 void AppSettings::setDisableGpu(const bool enabled)
 {
     settings_.setValue(disableGpuKey, enabled);
+}
+
+QString AppSettings::preferredRffKeyForDevice(const QString &deviceId) const
+{
+    if (deviceId.isEmpty()) {
+        return {};
+    }
+    return settings_.value(preferredRffByDevicePrefix + deviceId).toString();
+}
+
+void AppSettings::setPreferredRffKeyForDevice(const QString &deviceId, const QString &rffKey)
+{
+    if (deviceId.isEmpty()) {
+        return;
+    }
+    settings_.setValue(preferredRffByDevicePrefix + deviceId, rffKey);
 }
 
 } // namespace consolation::settings
