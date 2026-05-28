@@ -8,6 +8,8 @@ Installers are available for the following platforms in the Releases:
  * Ubuntu 26, 24, 22 (amd64 and arm64)
  * Raspberry Pi OS Trixie
 
+Consolation is also availble for Apple devices ([GitHub](https://github.com/centennial-oss/consolation-apple) | [App Store](https://apps.apple.com/us/app/consolation/id1563856788)), Android Tablets ([GitHub](https://github.com/centennial-oss/consolation-android) | [Play Store](https://play.google.com/store/apps/details?id=org.centennialoss.consolation)) and Windows ([GitHub](https://github.com/centennial-oss/consolation-windows) | [Microsoft Store](https://apps.microsoft.com/detail/9N96T6XGBFTF?hl=en-us&gl=US)).
+
 ## About
 
 Consolation is a free app that enables your Linux workstation or RPi to be used as a display for devices like gaming consoles, other Raspberry Pis, and even a Mac mini, Linux or Windows PC, via a standard USB Video Class (UVC) video capture card.
