@@ -4,10 +4,8 @@
 A 100% free, no-frills, incredibly performant video capture viewer for Linux with no analytics or snooping.
 
 Installers are available for the following platforms in the Releases:
- * Fedora 44 (x86_64 and aarch64)
- * Fedora 42 (x86_64 and aarch64)
- * Ubuntu 24.04 (amd64 and arm64)
- * Ubuntu 26.04 (amd64 and arm64)
+ * Fedora 44, 43, 42 (x86_64 and aarch64)
+ * Ubuntu 26, 24, 22 (amd64 and arm64)
  * Raspberry Pi OS Trixie
 
 ## About
