@@ -1,5 +1,7 @@
 #include "platform/linux/V4L2DeviceDiscovery.h"
 
+#include "capture/FourCc.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -72,21 +74,6 @@ QString formatFps(const double fps)
     return QString::number(fps, 'f', 2);
 }
 
-int pixelFormatRank(const QString &pixelFormat)
-{
-    if (pixelFormat == QStringLiteral("YUYV") || pixelFormat == QStringLiteral("YUY2")) {
-        return 0;
-    }
-    if (pixelFormat == QStringLiteral("NV12") || pixelFormat == QStringLiteral("P010") ||
-        pixelFormat == QStringLiteral("YU12") || pixelFormat == QStringLiteral("YV12")) {
-        return 1;
-    }
-    if (pixelFormat == QStringLiteral("MJPG") || pixelFormat == QStringLiteral("JPEG")) {
-        return 2;
-    }
-    return 3;
-}
-
 void addFormat(
     std::vector<capture::CaptureFormat> &formats,
     std::set<QString> &seen,
@@ -113,10 +100,10 @@ void addFormat(
     format.height = height;
     format.framesPerSecond = fps;
     format.pixelFormat = pixelFormat;
-    format.label = QStringLiteral("%1x%2 @ %3p · %4")
+    format.label = QStringLiteral("%1x%2 @ %3p (%4)")
                        .arg(width)
                        .arg(height)
-                       .arg(formatFps(fps), pixelFormat);
+                       .arg(formatFps(fps), capture::pixelFormatDisplayName(pixelFormat));
     formats.push_back(format);
 }
 
@@ -224,8 +211,10 @@ std::vector<capture::CaptureFormat> enumerateFormats(const int fd)
         if (std::abs(left.framesPerSecond - right.framesPerSecond) > 0.01) {
             return left.framesPerSecond > right.framesPerSecond;
         }
-        if (pixelFormatRank(left.pixelFormat) != pixelFormatRank(right.pixelFormat)) {
-            return pixelFormatRank(left.pixelFormat) < pixelFormatRank(right.pixelFormat);
+        const auto leftRank = capture::pixelFormatSelectionRank(left.pixelFormat);
+        const auto rightRank = capture::pixelFormatSelectionRank(right.pixelFormat);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
         }
         return left.pixelFormat < right.pixelFormat;
     });

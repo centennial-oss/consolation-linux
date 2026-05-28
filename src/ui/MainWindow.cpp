@@ -1600,38 +1600,14 @@ int resolutionPreferenceIndex(const int width, const int height)
     return -1;
 }
 
-int pixelFormatPreference(const QString &pixelFormat)
+bool prefersFormatForSelection(const capture::CaptureFormat &candidate, const capture::CaptureFormat &current)
 {
-    const auto upper = pixelFormat.toUpper();
-    if (upper == QStringLiteral("NV12")) {
-        return 0;
+    const auto candidateRank = capture::pixelFormatSelectionRank(candidate.pixelFormat);
+    const auto currentRank = capture::pixelFormatSelectionRank(current.pixelFormat);
+    if (candidateRank != currentRank) {
+        return candidateRank < currentRank;
     }
-    if (upper == QStringLiteral("P010")) {
-        return 1;
-    }
-    if (upper == QStringLiteral("YUYV")) {
-        return 2;
-    }
-    if (upper == QStringLiteral("YUY2")) {
-        return 3;
-    }
-    if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
-        return 5;
-    }
-    static const QSet<QString> uncompressed {
-        QStringLiteral("I420"),
-        QStringLiteral("YV12"),
-        QStringLiteral("YU12"),
-        QStringLiteral("YVU420"),
-        QStringLiteral("RGB3"),
-        QStringLiteral("BGR3"),
-        QStringLiteral("RGB24"),
-        QStringLiteral("BGR24"),
-    };
-    if (uncompressed.contains(upper)) {
-        return 4;
-    }
-    return 6;
+    return candidate.pixelFormat.compare(current.pixelFormat, Qt::CaseInsensitive) < 0;
 }
 
 QString formatPreferenceKey(const capture::CaptureFormat &format)
@@ -1672,31 +1648,6 @@ int autoResolutionPriority(const int width, const int height)
     return 3;
 }
 
-int autoPixelFormatPreference(const QString &pixelFormat)
-{
-    const auto upper = pixelFormat.toUpper();
-    if (upper == QStringLiteral("NV12")) {
-        return 0;
-    }
-    if (upper == QStringLiteral("P010")) {
-        return 1;
-    }
-    if (upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") || upper == QStringLiteral("YV12")) {
-        return 2;
-    }
-    if (upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2")) {
-        return 3;
-    }
-    if (upper == QStringLiteral("BGR3") || upper == QStringLiteral("RGB3") ||
-        upper == QStringLiteral("BGR24") || upper == QStringLiteral("RGB24")) {
-        return 4;
-    }
-    if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
-        return 5;
-    }
-    return 99;
-}
-
 int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
 {
     if (formats.empty()) {
@@ -1714,7 +1665,7 @@ int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
             if (std::abs(format.framesPerSecond - targetFps) > 0.6) {
                 continue;
             }
-            const auto pref = autoPixelFormatPreference(format.pixelFormat);
+            const auto pref = capture::pixelFormatSelectionRank(format.pixelFormat);
             if (pref >= 99) {
                 continue;
             }
@@ -1731,11 +1682,15 @@ int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
                 }
                 continue;
             }
-            const auto bestPref = autoPixelFormatPreference(best.pixelFormat);
+            const auto bestPref = capture::pixelFormatSelectionRank(best.pixelFormat);
             if (pref != bestPref) {
                 if (pref < bestPref) {
                     bestIndex = i;
                 }
+                continue;
+            }
+            if (prefersFormatForSelection(format, best)) {
+                bestIndex = i;
                 continue;
             }
             if (format.framesPerSecond > best.framesPerSecond) {
@@ -1751,7 +1706,7 @@ int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
     int bestAny = 0;
     for (auto i = 0; i < static_cast<int>(formats.size()); ++i) {
         const auto &format = formats[i];
-        const auto pref = autoPixelFormatPreference(format.pixelFormat);
+        const auto pref = capture::pixelFormatSelectionRank(format.pixelFormat);
         if (pref < 99) {
             if (bestKnown < 0) {
                 bestKnown = i;
@@ -1761,7 +1716,7 @@ int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
                 const auto bestArea = best.width * best.height;
                 if (area != bestArea ? area > bestArea
                                      : (format.framesPerSecond != best.framesPerSecond ? format.framesPerSecond > best.framesPerSecond
-                                                                                       : pref < autoPixelFormatPreference(best.pixelFormat))) {
+                                                                                       : prefersFormatForSelection(format, best))) {
                     bestKnown = i;
                 }
             }
@@ -1778,7 +1733,7 @@ int chooseAutoFormatIndex(const std::vector<capture::CaptureFormat> &formats)
 
 QString formatLeafLabel(const capture::CaptureFormat &format)
 {
-    return format.pixelFormat.isEmpty() ? format.label : format.pixelFormat;
+    return format.pixelFormat.isEmpty() ? format.label : capture::pixelFormatDisplayName(format.pixelFormat);
 }
 
 QPushButton *makePillButton(const QIcon &icon, const QString &text, QWidget *parent)
@@ -2288,18 +2243,16 @@ void MainWindow::buildStoppedState()
                     }
                 }
                 std::sort(formatIndices.begin(), formatIndices.end(), [this](const auto lhs, const auto rhs) {
-                    const auto &lhsFormat = selectedDevice_.formats[lhs];
-                    const auto &rhsFormat = selectedDevice_.formats[rhs];
-                    const auto lhsPreference = pixelFormatPreference(lhsFormat.pixelFormat);
-                    const auto rhsPreference = pixelFormatPreference(rhsFormat.pixelFormat);
-                    if (lhsPreference != rhsPreference) {
-                        return lhsPreference < rhsPreference;
-                    }
-                    return lhsFormat.pixelFormat < rhsFormat.pixelFormat;
+                    return prefersFormatForSelection(selectedDevice_.formats[lhs], selectedDevice_.formats[rhs]);
                 });
 
-                for (const auto formatIndex : formatIndices) {
-                    auto *action = frameRateMenu->addAction(formatLeafLabel(selectedDevice_.formats[formatIndex]));
+                for (auto sortedIndex = 0; sortedIndex < static_cast<int>(formatIndices.size()); ++sortedIndex) {
+                    const auto formatIndex = formatIndices[sortedIndex];
+                    auto label = formatLeafLabel(selectedDevice_.formats[formatIndex]);
+                    if (sortedIndex == 0) {
+                        label += QStringLiteral("  (default)");
+                    }
+                    auto *action = frameRateMenu->addAction(label);
                     connect(action, &QAction::triggered, this, [selectFormat, formatIndex]() { selectFormat(formatIndex, true); });
                 }
             }
@@ -2949,8 +2902,8 @@ QString MainWindow::formatStatsOverlayText() const
         pixelFourcc = stringToFourCc(selectedFormat_.pixelFormat);
     }
 
-    const auto pixelFormat =
-        pixelFourcc != 0 ? capture::fourCcToString(pixelFourcc) : selectedFormat_.pixelFormat;
+    const auto pixelFormat = capture::pixelFormatDisplayName(
+        pixelFourcc != 0 ? capture::fourCcToString(pixelFourcc) : selectedFormat_.pixelFormat);
 
     const auto frameMemory = resolveFrameMemoryLabel(latestTelemetry_);
 
