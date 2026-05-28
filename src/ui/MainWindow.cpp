@@ -30,7 +30,6 @@
 #include <QElapsedTimer>
 #include <QDesktopServices>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QEvent>
 #include <QFile>
 #include <QFrame>
@@ -1384,6 +1383,14 @@ constexpr auto dialogStyle = R"(
     }
     QLabel {
         color: white;
+    }
+    QRadioButton {
+        color: #CCCCCC;
+        font-size: 16px;
+    }
+    QCheckBox {
+        color: #CCCCCC;
+        font-size: 16px;
     }
     QTextEdit {
         color: white;
@@ -3262,10 +3269,13 @@ void MainWindow::showSettingsDialog()
     });
 
     layout->addWidget(makeDivider(&dialog));
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    auto *closeButton = new QPushButton(QStringLiteral("Close"), &dialog);
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    auto *closeRow = new QHBoxLayout();
+    closeRow->addStretch();
+    closeRow->addWidget(closeButton);
     layout->addStretch();
-    layout->addWidget(buttons);
+    layout->addLayout(closeRow);
 
     dialog.exec();
 }
@@ -3323,9 +3333,12 @@ void MainWindow::showHelpDialog()
 
     layout->addWidget(makeDivider(&dialog));
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
-    layout->addWidget(buttons);
+    auto *closeButton = new QPushButton(QStringLiteral("Close"), &dialog);
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    auto *closeRow = new QHBoxLayout();
+    closeRow->addStretch();
+    closeRow->addWidget(closeButton);
+    layout->addLayout(closeRow);
 
     dialog.exec();
 }
