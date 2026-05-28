@@ -107,6 +107,9 @@ qt_add_resources(consolation "consolation"
     FILES
         assets/icons/power.svg
         assets/icons/settings.svg
+        assets/icons/app-window.svg
+        assets/icons/maximize-2.svg
+        assets/icons/minimize-2.svg
         assets/icons/zoom-out.svg
         assets/icons/zoom-in.svg
         assets/icons/play.svg

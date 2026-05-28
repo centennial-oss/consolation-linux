@@ -45,12 +45,15 @@
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLWidget>
+#include <QGuiApplication>
 #include <QSurfaceFormat>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
+#include <QShortcut>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
@@ -1913,6 +1916,17 @@ MainWindow::MainWindow(QWidget *parent)
 
     buildStoppedState();
 
+    auto *fullScreenShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
+    fullScreenShortcut->setContext(Qt::ApplicationShortcut);
+    connect(fullScreenShortcut, &QShortcut::activated, this, &MainWindow::toggleFullScreen);
+    auto *exitFullScreenShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    exitFullScreenShortcut->setContext(Qt::ApplicationShortcut);
+    connect(exitFullScreenShortcut, &QShortcut::activated, this, [this]() {
+        if (isFullScreen()) {
+            toggleFullScreen();
+        }
+    });
+
     qApp->installEventFilter(this);
 }
 
@@ -1929,6 +1943,78 @@ MainWindow::~MainWindow()
         captureThread_->wait();
         delete captureThread_;
     }
+}
+
+void MainWindow::toggleFullScreen()
+{
+    if (isFullScreen()) {
+        setWindowState(windowStateBeforeFullScreen_);
+    } else {
+        windowStateBeforeFullScreen_ = windowState() & ~Qt::WindowFullScreen;
+        showFullScreen();
+    }
+
+    updateFullScreenToggleButton();
+}
+
+void MainWindow::resizeWindowToVideoScale(const double scaleFactor)
+{
+    if (selectedFormat_.width <= 0 || selectedFormat_.height <= 0 || scaleFactor <= 0.0) {
+        return;
+    }
+
+    if (isFullScreen()) {
+        toggleFullScreen();
+    }
+    if (isMaximized()) {
+        showNormal();
+        QTimer::singleShot(300, this, [this, scaleFactor]() {
+            resizeWindowToVideoScale(scaleFactor);
+        });
+        return;
+    }
+
+    const int targetWidth = qRound(static_cast<double>(selectedFormat_.width) * scaleFactor);
+    const int targetHeight = qRound(static_cast<double>(selectedFormat_.height) * scaleFactor);
+
+    QSize targetSize(targetWidth, targetHeight);
+    targetSize = targetSize.expandedTo(minimumSize());
+
+    QScreen *screen = nullptr;
+    if (windowHandle() != nullptr) {
+        screen = windowHandle()->screen();
+    }
+    if (screen == nullptr) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen != nullptr) {
+        const QSize availableSize = screen->availableGeometry().size();
+        const QSize frameDelta(
+            std::max(0, frameGeometry().width() - geometry().width()),
+            std::max(0, frameGeometry().height() - geometry().height()));
+        const QSize maxClientSize(
+            std::max(1, availableSize.width() - frameDelta.width()),
+            std::max(1, availableSize.height() - frameDelta.height()));
+        targetSize = targetSize.boundedTo(maxClientSize);
+    }
+
+    resize(targetSize);
+}
+
+void MainWindow::updateFullScreenToggleButton()
+{
+    if (!fullScreenToggleButton_) {
+        return;
+    }
+
+    const bool currentlyFullScreen = isFullScreen();
+    const auto iconPath = currentlyFullScreen
+        ? QStringLiteral(":/icons/minimize-2.svg")
+        : QStringLiteral(":/icons/maximize-2.svg");
+    const auto iconColor = currentlyFullScreen
+        ? QColor(QStringLiteral("#CC11BB"))
+        : QColor(Qt::white);
+    setPlaybackButtonPixmap(fullScreenToggleButton_, renderIconPixmap(iconPath, iconColor, 24));
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
@@ -2572,7 +2658,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     auto *controls = new QFrame(video);
     controls->setFixedHeight(64);
     controls->setStyleSheet(QStringLiteral(
-        "QFrame { background-color: rgba(34, 34, 34, 221); "
+        "QFrame { background-color: rgba(34, 34, 34, 236); "
         "border: 1px solid rgba(68, 68, 68, 238); border-radius: 32px; }"));
 
     auto *controlsLayout = new QHBoxLayout(controls);
@@ -2585,12 +2671,15 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     const auto volumeOffIcon = renderIconPixmap(QStringLiteral(":/icons/volume-off.svg"), whiteIcon, 24);
     const auto zoomOutIcon = renderIconPixmap(QStringLiteral(":/icons/zoom-out.svg"), whiteIcon, 22);
     const auto zoomInIcon = renderIconPixmap(QStringLiteral(":/icons/zoom-in.svg"), whiteIcon, 22);
+    const auto resizeIcon = renderIconPixmap(QStringLiteral(":/icons/app-window.svg"), whiteIcon, 24);
     const auto settingsIcon = renderIconPixmap(QStringLiteral(":/icons/settings.svg"), whiteIcon, 24);
 
     auto *powerButton = makePlaybackCircleButton(powerIcon, 42, controls);
     auto *volumeButton = makePlaybackCircleButton(volumeOnIcon, 36, controls);
     auto *zoomOut = makePlaybackIconLabel(zoomOutIcon, controls);
     auto *zoomIn = makePlaybackIconLabel(zoomInIcon, controls);
+    auto *resizeButton = makePlaybackCircleButton(resizeIcon, 36, controls);
+    auto *fullScreenButton = makePlaybackCircleButton(QPixmap(), 36, controls);
     auto *settingsButton = makePlaybackCircleButton(settingsIcon, 42, controls);
 
     auto *volumeSlider = makePlaybackSlider(controls);
@@ -2634,7 +2723,31 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
         video->setZoomPercent(zoomPercent_);
         resetPlaybackControlsTimer();
     });
+    connect(resizeButton, &QPushButton::clicked, this, [this, resizeButton]() {
+        QMenu menu(this);
+        auto *halfScale = menu.addAction(QStringLiteral("Resize Window to 0.5x"));
+        auto *oneScale = menu.addAction(QStringLiteral("Resize Window to 1x"));
+        auto *oneHalfScale = menu.addAction(QStringLiteral("Resize Window to 1.5x"));
+
+        const QPoint menuPosition = resizeButton->mapToGlobal(QPoint(0, resizeButton->height() + 8));
+        QAction *selectedAction = menu.exec(menuPosition);
+        if (selectedAction == halfScale) {
+            resizeWindowToVideoScale(0.5);
+        } else if (selectedAction == oneScale) {
+            resizeWindowToVideoScale(1.0);
+        } else if (selectedAction == oneHalfScale) {
+            resizeWindowToVideoScale(1.5);
+        }
+
+        resetPlaybackControlsTimer();
+    });
+    connect(fullScreenButton, &QPushButton::clicked, this, [this]() {
+        toggleFullScreen();
+        resetPlaybackControlsTimer();
+    });
     setPlaybackButtonPixmap(volumeButton, (playbackMuted_ || volumeSlider->value() <= 0) ? volumeOffIcon : volumeOnIcon);
+    fullScreenToggleButton_ = fullScreenButton;
+    updateFullScreenToggleButton();
 
     controlsLayout->addWidget(powerButton);
     controlsLayout->addWidget(makeBarDivider(controls));
@@ -2644,6 +2757,9 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     controlsLayout->addWidget(zoomOut);
     controlsLayout->addWidget(zoomSlider);
     controlsLayout->addWidget(zoomIn);
+    controlsLayout->addWidget(makeBarDivider(controls));
+    controlsLayout->addWidget(resizeButton);
+    controlsLayout->addWidget(fullScreenButton);
     controlsLayout->addWidget(makeBarDivider(controls));
     controlsLayout->addWidget(settingsButton);
 

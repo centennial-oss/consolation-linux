@@ -44,9 +44,6 @@ Linux capture device testing is in progress. The other Consolation ports have be
 ## TODO
 
 - Automate release builds via GitHub Workflow
-- Support Full Screen Mode (currently supports Windowed/Maximized)
-- Support Stay-on-Top
-- Support GUI Menu Icons to launch the App (currently must launch from terminal or Run dialog)
 
 ## Requirements
 
@@ -55,7 +52,7 @@ Linux capture device testing is in progress. The other Consolation ports have be
 - A modern Linux distribution, recent as of January 2025, with support for Qt 6 and V4L2
 - A UVC-compliant video capture card
 
-`deb` and `rpm` installers place the binary in`/usr/bin/consolation`. It is recommended to run as an unprivileged user.
+`deb` and `rpm` installers place the binary in`/usr/bin/consolation` and add to the 'Audio & Video' Launcher menu. It is recommended to run as an unprivileged user.
 
 ### Developer
 
@@ -70,7 +67,7 @@ See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands.
 For a local dev build, run:
 
 ```sh
-make build-linux
+make build
 ```
 
 See the Makefile for release build targets.

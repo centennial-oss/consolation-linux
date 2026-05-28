@@ -6,6 +6,9 @@
     <qresource prefix="/icons">
         <file alias="power.svg">../assets/icons/power.svg</file>
         <file alias="settings.svg">../assets/icons/settings.svg</file>
+        <file alias="app-window.svg">../assets/icons/app-window.svg</file>
+        <file alias="maximize-2.svg">../assets/icons/maximize-2.svg</file>
+        <file alias="minimize-2.svg">../assets/icons/minimize-2.svg</file>
         <file alias="zoom-out.svg">../assets/icons/zoom-out.svg</file>
         <file alias="zoom-in.svg">../assets/icons/zoom-in.svg</file>
         <file alias="play.svg">../assets/icons/play.svg</file>

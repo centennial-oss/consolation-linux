@@ -15,6 +15,7 @@
 
 class QFrame;
 class QLabel;
+class QPushButton;
 class QThread;
 class QTimer;
 
@@ -67,6 +68,9 @@ private:
     void showAboutDialog();
     void applyPlaybackViewSettings();
     void updateLowFpsWarning();
+    void toggleFullScreen();
+    void resizeWindowToVideoScale(double scaleFactor);
+    void updateFullScreenToggleButton();
 
     settings::AppSettings settings_;
     std::vector<capture::CaptureDevice> devices_;
@@ -77,6 +81,7 @@ private:
     QPointer<QLabel> statsOverlay_;
     QPointer<QLabel> lowFpsWarningOverlay_;
     QPointer<QFrame> playbackControls_;
+    QPointer<QPushButton> fullScreenToggleButton_;
     QTimer *controlsHideTimer_ = nullptr;
     QTimer *statsOverlayTimer_ = nullptr;
     QTimer *startupRefreshTimer_ = nullptr;
@@ -102,6 +107,7 @@ private:
     qint64 lowFpsRecoveredSinceMs_ = 0;
     bool lowFpsVisible_ = false;
     bool playbackMuted_ = false;
+    Qt::WindowStates windowStateBeforeFullScreen_ = Qt::WindowNoState;
     std::atomic<bool> playbackStopping_{false};
     std::unique_ptr<audio::AudioSession> audioSession_;
     std::unique_ptr<capture::CaptureSession> captureSession_;
