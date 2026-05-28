@@ -6,6 +6,6 @@
 namespace consolation::ui {
 
 [[nodiscard]] QIcon createAppIcon();
-[[nodiscard]] QPixmap appIconPixmap(int size, int cornerRadius = -1);
+[[nodiscard]] QPixmap appIconPixmap(int size);
 
 } // namespace consolation::ui

@@ -1,0 +1,200 @@
+name: Release Linux Package Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Fedora amd64
+          - id: fedora-42-amd64
+            runner: ubuntu-24.04
+            image: fedora:42
+            bootstrap: scripts/bootstrap-fedora-42.sh
+            target: build-fedora-42-amd64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          - id: fedora-43-amd64
+            runner: ubuntu-24.04
+            image: fedora:43
+            bootstrap: scripts/bootstrap-fedora-43.sh
+            target: build-fedora-43-amd64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          - id: fedora-44-amd64
+            runner: ubuntu-24.04
+            image: fedora:44
+            bootstrap: scripts/bootstrap-fedora-44.sh
+            target: build-fedora-44-amd64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          # Fedora arm64
+          - id: fedora-42-arm64
+            runner: ubuntu-24.04-arm
+            image: fedora:42
+            bootstrap: scripts/bootstrap-fedora-42.sh
+            target: build-fedora-42-arm64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          - id: fedora-43-arm64
+            runner: ubuntu-24.04-arm
+            image: fedora:43
+            bootstrap: scripts/bootstrap-fedora-43.sh
+            target: build-fedora-43-arm64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          - id: fedora-44-arm64
+            runner: ubuntu-24.04-arm
+            image: fedora:44
+            bootstrap: scripts/bootstrap-fedora-44.sh
+            target: build-fedora-44-arm64
+            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
+
+          # Ubuntu amd64
+          - id: ubuntu-22-amd64
+            runner: ubuntu-24.04
+            image: ubuntu:22.04
+            bootstrap: scripts/bootstrap-ubuntu-22.sh
+            target: build-ubuntu-22-amd64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          - id: ubuntu-24-amd64
+            runner: ubuntu-24.04
+            image: ubuntu:24.04
+            bootstrap: scripts/bootstrap-ubuntu-24.sh
+            target: build-ubuntu-24-amd64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          - id: ubuntu-26-amd64
+            runner: ubuntu-24.04
+            image: ubuntu:26.04
+            bootstrap: scripts/bootstrap-ubuntu-26.sh
+            target: build-ubuntu-26-amd64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          # Ubuntu arm64
+          - id: ubuntu-22-arm64
+            runner: ubuntu-22.04-arm
+            image: ubuntu:22.04
+            bootstrap: scripts/bootstrap-ubuntu-22.sh
+            target: build-ubuntu-22-arm64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          - id: ubuntu-24-arm64
+            runner: ubuntu-24.04-arm
+            image: ubuntu:24.04
+            bootstrap: scripts/bootstrap-ubuntu-24.sh
+            target: build-ubuntu-24-arm64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          - id: ubuntu-26-arm64
+            runner: ubuntu-24.04-arm
+            image: ubuntu:26.04
+            bootstrap: scripts/bootstrap-ubuntu-26.sh
+            target: build-ubuntu-26-arm64
+            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
+
+          # Raspberry Pi OS (Debian-compatible)
+          - id: rpi-bookworm-arm64
+            runner: ubuntu-24.04-arm
+            image: debian:bookworm
+            bootstrap: scripts/bootstrap-rpi-bookworm.sh
+            target: build-rpi-bookworm-arm64
+            artifact_glob: "dist/**/*.{deb,tar.gz}"
+
+          - id: rpi-trixie-arm64
+            runner: ubuntu-24.04-arm
+            image: debian:trixie
+            bootstrap: scripts/bootstrap-rpi-trixie.sh
+            target: build-rpi-trixie-arm64
+            artifact_glob: "dist/**/*.{deb,tar.gz}"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build inside distro container
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$PWD/dist"
+
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env CI=1 \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euxo pipefail
+              chmod +x "${{ matrix.bootstrap }}"
+              "${{ matrix.bootstrap }}"
+              make "${{ matrix.target }}"
+            '
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p upload/${{ matrix.id }}
+
+          shopt -s globstar nullglob
+
+          files=( ${{ matrix.artifact_glob }} )
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No artifacts matched:"
+            echo "${{ matrix.artifact_glob }}"
+            find dist -type f || true
+            exit 1
+          fi
+
+          cp "${files[@]}" upload/${{ matrix.id }}/
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolation-${{ matrix.id }}
+          path: upload/${{ matrix.id }}/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Create draft release
+    runs-on: ubuntu-24.04
+    needs: build-linux
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: List release artifacts
+        run: find release-artifacts -type f -maxdepth 2 -print
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Consolation ${{ inputs.tag }}
+          draft: true
+          prerelease: false
+          files: release-artifacts/*

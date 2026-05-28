@@ -1,7 +1,7 @@
 <RCC>
     <qresource prefix="/app">
-        <file alias="app-icon.png">../assets/icons/app-icon.png</file>
-        <file alias="app-icon-large.png">../assets/icons/app-icon-large.png</file>
+        <file alias="app-icon-rounded.png">../assets/icons/app-icon-rounded.png</file>
+        <file alias="app-icon-large-rounded.png">../assets/icons/app-icon-large-rounded.png</file>
     </qresource>
     <qresource prefix="/icons">
         <file alias="power.svg">../assets/icons/power.svg</file>

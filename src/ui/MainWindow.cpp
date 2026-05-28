@@ -1500,11 +1500,11 @@ protected:
     }
 };
 
-QLabel *makeAppIconLabel(const int size, const int cornerRadius, QWidget *parent)
+QLabel *makeAppIconLabel(const int size, QWidget *parent)
 {
     auto *icon = new QLabel(parent);
     icon->setFixedSize(size, size);
-    icon->setPixmap(appIconPixmap(size, cornerRadius));
+    icon->setPixmap(appIconPixmap(size));
     icon->setScaledContents(false);
     return icon;
 }
@@ -1866,7 +1866,7 @@ QHBoxLayout *makeModalHeader(const QString &title, const QString &subtitle, cons
     auto *header = new QHBoxLayout();
     header->setAlignment(Qt::AlignVCenter);
     header->setSpacing(14);
-    header->addWidget(makeAppIconLabel(iconSize, iconSize >= 64 ? 14 : 10, parent));
+    header->addWidget(makeAppIconLabel(iconSize, parent));
     auto *titleBlock = new QVBoxLayout();
     titleBlock->setSpacing(4);
     auto *titleLabel = new QLabel(title, parent);
@@ -2082,7 +2082,7 @@ void MainWindow::buildStoppedState()
 
     auto *header = new QHBoxLayout();
     header->setSpacing(14);
-    header->addWidget(makeAppIconLabel(64, 14, panel));
+    header->addWidget(makeAppIconLabel(64, panel));
 
     auto *title = new QLabel(QStringLiteral("Consolation"), panel);
     title->setStyleSheet(QStringLiteral("color: white; font-size: 31px; font-weight: 800;"));

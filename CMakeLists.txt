@@ -131,8 +131,8 @@ qt_add_resources(consolation "consolation_app_icons"
     PREFIX "/app"
     BASE assets/icons
     FILES
-        assets/icons/app-icon.png
-        assets/icons/app-icon-large.png
+        assets/icons/app-icon-rounded.png
+        assets/icons/app-icon-large-rounded.png
 )
 
 target_link_libraries(consolation
@@ -166,13 +166,13 @@ install(FILES packaging/linux/org.centennialoss.consolation.desktop
 set(CONSOLATION_ICON_NAME org.centennialoss.consolation)
 foreach(CONSOLATION_ICON_SIZE IN ITEMS 48 128)
     install(
-        FILES assets/icons/app-icon.png
+        FILES assets/icons/app-icon-rounded.png
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${CONSOLATION_ICON_SIZE}x${CONSOLATION_ICON_SIZE}/apps
         RENAME ${CONSOLATION_ICON_NAME}.png
     )
 endforeach()
 install(
-    FILES assets/icons/app-icon-large.png
+    FILES assets/icons/app-icon-large-rounded.png
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
     RENAME ${CONSOLATION_ICON_NAME}.png
 )

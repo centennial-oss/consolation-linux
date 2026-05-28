@@ -1,4 +1,4 @@
-# <img src="assets/icons/app-icon.png" alt="Consolation" height="48" /> Consolation™
+# <img src="assets/icons/app-icon-large-rounded.png" alt="Consolation" height="48" /> Consolation™
 
 
 A 100% free, no-frills, incredibly performant video capture viewer for Linux with no analytics or snooping.
