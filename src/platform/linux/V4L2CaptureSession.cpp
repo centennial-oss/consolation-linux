@@ -15,6 +15,10 @@
 #include <cstring>
 #include <fcntl.h>
 #include <linux/videodev2.h>
+
+#ifndef V4L2_PIX_FMT_P010
+#define V4L2_PIX_FMT_P010 v4l2_fourcc('P', '0', '1', '0')
+#endif
 #include <numeric>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -289,6 +293,8 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
             bytesPerLine_ = width_ * 2;
         } else if (pixelFormat_ == V4L2_PIX_FMT_RGB24 || pixelFormat_ == V4L2_PIX_FMT_BGR24) {
             bytesPerLine_ = width_ * 3;
+        } else if (pixelFormat_ == V4L2_PIX_FMT_P010) {
+            bytesPerLine_ = width_ * 2;
         } else {
             bytesPerLine_ = width_;
         }
@@ -502,6 +508,10 @@ capture::FrameHandle V4L2CaptureSession::decodeFrame(const void *data, const int
         return decodeNv12(static_cast<const uchar *>(data), bytesUsed);
     }
 
+    if (pixelFormat_ == V4L2_PIX_FMT_P010) {
+        return decodeP010(static_cast<const uchar *>(data), bytesUsed);
+    }
+
     if (pixelFormat_ == V4L2_PIX_FMT_YUV420) {
         return decodeI420(static_cast<const uchar *>(data), bytesUsed, false);
     }
@@ -627,6 +637,38 @@ capture::FrameHandle V4L2CaptureSession::decodeNv12(const uchar *data, const int
     return frame;
 }
 
+capture::FrameHandle V4L2CaptureSession::decodeP010(const uchar *data, const int bytesUsed)
+{
+    const auto byteStride = std::max(bytesPerLine_, width_ * 2);
+    const auto sampleStride = byteStride / 2;
+    if (width_ <= 0 || height_ <= 0 || bytesUsed < byteStride * height_ * 3 / 2 || framePool_ == nullptr) {
+        return {};
+    }
+
+    const auto *yPlane = reinterpret_cast<const uint16_t *>(data);
+    const auto *uvPlane = reinterpret_cast<const uint16_t *>(data + static_cast<size_t>(byteStride) * static_cast<size_t>(height_));
+    auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
+    auto *image = writableFramePixels(frame);
+    if (image == nullptr) {
+        return {};
+    }
+
+    const auto result = libyuv::P010ToARGBMatrix(
+        yPlane,
+        sampleStride,
+        uvPlane,
+        sampleStride,
+        image->bits(),
+        image->bytesPerLine(),
+        &libyuv::kYuvH709Constants,
+        width_,
+        height_);
+    if (result != 0) {
+        return {};
+    }
+    return frame;
+}
+
 capture::FrameHandle V4L2CaptureSession::decodeI420(const uchar *data, const int bytesUsed, const bool yvu)
 {
     const auto yStride = std::max(bytesPerLine_, width_);
@@ -710,6 +752,10 @@ bool V4L2CaptureSession::frameReadyForDmaDisplay(const int bytesUsed, const __u3
     if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
         return bytesUsed >= yStride * height_ * 3 / 2;
     }
+    if (pixelFormat_ == V4L2_PIX_FMT_P010) {
+        const auto byteStride = std::max(bytesPerLine_, width_ * 2);
+        return bytesUsed >= byteStride * height_ * 3 / 2;
+    }
     if (pixelFormat_ == V4L2_PIX_FMT_YUYV || pixelFormat_ == v4l2_fourcc('Y', 'U', 'Y', '2')) {
         return bytesUsed >= std::max(bytesPerLine_, width_ * 2) * height_;
     }
@@ -786,10 +832,10 @@ void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
 
 bool V4L2CaptureSession::pixelFormatSupportsDmaBufDisplay(const quint32 pixelFormat)
 {
-    return pixelFormat == V4L2_PIX_FMT_NV12 || pixelFormat == V4L2_PIX_FMT_RGB24 ||
-        pixelFormat == V4L2_PIX_FMT_BGR24 || pixelFormat == V4L2_PIX_FMT_YUYV ||
-        pixelFormat == v4l2_fourcc('Y', 'U', 'Y', '2') || pixelFormat == V4L2_PIX_FMT_YUV420 ||
-        pixelFormat == V4L2_PIX_FMT_YVU420;
+    return pixelFormat == V4L2_PIX_FMT_NV12 || pixelFormat == V4L2_PIX_FMT_P010 ||
+        pixelFormat == V4L2_PIX_FMT_RGB24 || pixelFormat == V4L2_PIX_FMT_BGR24 ||
+        pixelFormat == V4L2_PIX_FMT_YUYV || pixelFormat == v4l2_fourcc('Y', 'U', 'Y', '2') ||
+        pixelFormat == V4L2_PIX_FMT_YUV420 || pixelFormat == V4L2_PIX_FMT_YVU420;
 }
 
 bool V4L2CaptureSession::useDmaBufDisplayPath() const
@@ -822,6 +868,9 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
         slot.layout = capture::DmaBufLayout::Nv12;
         slot.stride = std::max(bytesPerLine_, width_);
+    } else if (pixelFormat_ == V4L2_PIX_FMT_P010) {
+        slot.layout = capture::DmaBufLayout::P010;
+        slot.stride = std::max(bytesPerLine_, width_ * 2);
     } else if (pixelFormat_ == V4L2_PIX_FMT_RGB24) {
         slot.layout = capture::DmaBufLayout::Rgb888;
         slot.stride = std::max(bytesPerLine_, width_ * 3);

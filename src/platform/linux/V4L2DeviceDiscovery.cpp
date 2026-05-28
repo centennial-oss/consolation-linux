@@ -77,7 +77,8 @@ int pixelFormatRank(const QString &pixelFormat)
     if (pixelFormat == QStringLiteral("YUYV") || pixelFormat == QStringLiteral("YUY2")) {
         return 0;
     }
-    if (pixelFormat == QStringLiteral("NV12") || pixelFormat == QStringLiteral("YU12") || pixelFormat == QStringLiteral("YV12")) {
+    if (pixelFormat == QStringLiteral("NV12") || pixelFormat == QStringLiteral("P010") ||
+        pixelFormat == QStringLiteral("YU12") || pixelFormat == QStringLiteral("YV12")) {
         return 1;
     }
     if (pixelFormat == QStringLiteral("MJPG") || pixelFormat == QStringLiteral("JPEG")) {

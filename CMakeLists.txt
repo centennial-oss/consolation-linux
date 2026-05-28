@@ -46,6 +46,8 @@ add_library(consolation_core STATIC
     src/capture/FrameBufferPool.h
     src/platform/linux/Nv12DmaBufGl.cpp
     src/platform/linux/Nv12DmaBufGl.h
+    src/platform/linux/P010DmaBufGl.cpp
+    src/platform/linux/P010DmaBufGl.h
     src/platform/linux/RgbDmaBufGl.cpp
     src/platform/linux/RgbDmaBufGl.h
     src/platform/linux/YuyvDmaBufGl.cpp

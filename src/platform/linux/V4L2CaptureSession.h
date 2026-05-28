@@ -53,6 +53,7 @@ private:
     [[nodiscard]] capture::FrameHandle decodeFrame(const void *data, int bytesUsed);
     [[nodiscard]] capture::FrameHandle decodeYuyv(const uchar *data, int bytesUsed);
     [[nodiscard]] capture::FrameHandle decodeNv12(const uchar *data, int bytesUsed);
+    [[nodiscard]] capture::FrameHandle decodeP010(const uchar *data, int bytesUsed);
     [[nodiscard]] capture::FrameHandle decodeI420(const uchar *data, int bytesUsed, bool yvu);
     [[nodiscard]] capture::FrameHandle decodeRgb24(const uchar *data, int bytesUsed, bool bgr, bool flipVertical);
     [[nodiscard]] capture::FrameHandle decodeMjpeg(const uchar *data, int bytesUsed);

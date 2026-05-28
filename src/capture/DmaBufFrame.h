@@ -9,6 +9,7 @@ namespace consolation::capture {
 enum class DmaBufLayout {
     Unknown = 0,
     Nv12,
+    P010,
     Rgb888,
     Bgr888,
     Yuyv422,

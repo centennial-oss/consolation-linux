@@ -7,6 +7,7 @@
 #include "capture/DmaBufFrame.h"
 #include "capture/MonotonicClock.h"
 #include "platform/linux/Nv12DmaBufGl.h"
+#include "platform/linux/P010DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
 #include "platform/linux/YuyvDmaBufGl.h"
 #include "platform/linux/I420DmaBufGl.h"
@@ -499,6 +500,7 @@ public:
         case 1: if (rgbGl_.has_value())   { rgbGl_->releaseFrame(); }   break;
         case 2: if (yuyvGl_.has_value())  { yuyvGl_->releaseFrame(); }  break;
         case 3: if (i420Gl_.has_value())  { i420Gl_->releaseFrame(); }  break;
+        case 4: if (p010Gl_.has_value())  { p010Gl_->releaseFrame(); }  break;
         default: break;
         }
         activeGlRenderer_ = -1;
@@ -575,6 +577,18 @@ protected:
                 std::cout << " (" << reason.toStdString() << ")";
             }
             std::cout << "; YU12/I420/YV12 will use libyuv CPU decode" << std::endl;
+            std::cout.flush();
+        }
+
+        p010Gl_.emplace();
+        if (!p010Gl_->initialize()) {
+            const auto reason = p010Gl_->lastInitFailure();
+            p010Gl_.reset();
+            std::cout << "[MainWindow capture] P010 DMA-BUF GL import unavailable";
+            if (!reason.isEmpty()) {
+                std::cout << " (" << reason.toStdString() << ")";
+            }
+            std::cout << "; P010 will use libyuv CPU decode" << std::endl;
             std::cout.flush();
         }
     }
@@ -746,6 +760,14 @@ private:
                 }
             }
             break;
+        case 4:
+            if (p010Gl_) {
+                p010Gl_->releaseFrame();
+                if (bufferIndex >= 0) {
+                    p010Gl_->invalidateSlot(bufferIndex);
+                }
+            }
+            break;
         default:
             break;
         }
@@ -803,6 +825,14 @@ private:
                 [&]() { nv12Gl_->draw(size(), targetRect_, dpr); });
         }
 
+        if (frame.layout == capture::DmaBufLayout::P010) {
+            return paintDmaLayout(
+                4,
+                p010Gl_ && p010Gl_->isAvailable(),
+                [&]() { return p010Gl_->bindFrame(dmaFrame_); },
+                [&]() { p010Gl_->draw(size(), targetRect_, dpr); });
+        }
+
         if (frame.layout == capture::DmaBufLayout::Rgb888 || frame.layout == capture::DmaBufLayout::Bgr888) {
             return paintDmaLayout(
                 1,
@@ -840,6 +870,7 @@ private:
     }
 
     std::optional<platform::linux::Nv12DmaBufGl> nv12Gl_;
+    std::optional<platform::linux::P010DmaBufGl> p010Gl_;
     std::optional<platform::linux::RgbDmaBufGl> rgbGl_;
     std::optional<platform::linux::YuyvDmaBufGl> yuyvGl_;
     std::optional<platform::linux::I420DmaBufGl> i420Gl_;
@@ -858,7 +889,7 @@ private:
     QSize lastSrcSize_;
     QSize lastWidgetSize_;
     float dpr_ = 1.0f;
-    int activeGlRenderer_ = -1; // 0=nv12, 1=rgb, 2=yuyv, 3=i420; -1=none
+    int activeGlRenderer_ = -1; // 0=nv12, 1=rgb, 2=yuyv, 3=i420, 4=p010; -1=none
     bool firstFramePainted_ = false;
     int paintCount_ = 0;
     int rotationDegrees_ = 0;
@@ -869,12 +900,12 @@ private:
 bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
 {
     const auto upper = pixelFormat.toUpper();
-    return upper == QStringLiteral("NV12") || upper == QStringLiteral("RGB3") ||
-        upper == QStringLiteral("RGB24") || upper == QStringLiteral("BGR3") ||
-        upper == QStringLiteral("BGR24") || upper == QStringLiteral("YUYV") ||
-        upper == QStringLiteral("YUY2") || upper == QStringLiteral("YU12") ||
-        upper == QStringLiteral("I420") || upper == QStringLiteral("YV12") ||
-        upper == QStringLiteral("YVU420");
+    return upper == QStringLiteral("NV12") || upper == QStringLiteral("P010") ||
+        upper == QStringLiteral("RGB3") || upper == QStringLiteral("RGB24") ||
+        upper == QStringLiteral("BGR3") || upper == QStringLiteral("BGR24") ||
+        upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2") ||
+        upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") ||
+        upper == QStringLiteral("YV12") || upper == QStringLiteral("YVU420");
 }
 
 bool canCreateOpenGLContext()
@@ -1575,14 +1606,17 @@ int pixelFormatPreference(const QString &pixelFormat)
     if (upper == QStringLiteral("NV12")) {
         return 0;
     }
-    if (upper == QStringLiteral("YUYV")) {
+    if (upper == QStringLiteral("P010")) {
         return 1;
     }
-    if (upper == QStringLiteral("YUY2")) {
+    if (upper == QStringLiteral("YUYV")) {
         return 2;
     }
+    if (upper == QStringLiteral("YUY2")) {
+        return 3;
+    }
     if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
-        return 4;
+        return 5;
     }
     static const QSet<QString> uncompressed {
         QStringLiteral("I420"),
@@ -1595,9 +1629,9 @@ int pixelFormatPreference(const QString &pixelFormat)
         QStringLiteral("BGR24"),
     };
     if (uncompressed.contains(upper)) {
-        return 3;
+        return 4;
     }
-    return 5;
+    return 6;
 }
 
 QString formatPreferenceKey(const capture::CaptureFormat &format)
@@ -1644,18 +1678,21 @@ int autoPixelFormatPreference(const QString &pixelFormat)
     if (upper == QStringLiteral("NV12")) {
         return 0;
     }
-    if (upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") || upper == QStringLiteral("YV12")) {
+    if (upper == QStringLiteral("P010")) {
         return 1;
     }
-    if (upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2")) {
+    if (upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") || upper == QStringLiteral("YV12")) {
         return 2;
+    }
+    if (upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2")) {
+        return 3;
     }
     if (upper == QStringLiteral("BGR3") || upper == QStringLiteral("RGB3") ||
         upper == QStringLiteral("BGR24") || upper == QStringLiteral("RGB24")) {
-        return 3;
+        return 4;
     }
     if (upper == QStringLiteral("MJPG") || upper == QStringLiteral("MJPEG") || upper == QStringLiteral("JPEG")) {
-        return 4;
+        return 5;
     }
     return 99;
 }
