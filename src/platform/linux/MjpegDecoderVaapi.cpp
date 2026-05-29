@@ -35,6 +35,7 @@ namespace {
 constexpr bool kOptPersistentExportImage = true;
 constexpr bool kOptReuseVaTableBuffers = true;
 constexpr bool kOptFastSosHeaderParse = false;
+constexpr bool kOptSkipVaSyncBeforeExport = true;
 
 constexpr uint8_t kMarkerPrefix = 0xFF;
 
@@ -681,10 +682,13 @@ struct VaapiDecoder::Impl {
             vaDestroyBuffer(display, sliceDataBuffer);
         }
 
-        const auto syncStartNs = timings ? consolation::capture::monotonicClockNs() : 0;
-        const auto syncOk = vaSyncSurface(display, targetSurface) == VA_STATUS_SUCCESS;
-        if (timings != nullptr) {
-            timings->syncMs = elapsedMs(syncStartNs);
+        bool syncOk = true;
+        if (!kOptSkipVaSyncBeforeExport) {
+            const auto syncStartNs = timings ? consolation::capture::monotonicClockNs() : 0;
+            syncOk = vaSyncSurface(display, targetSurface) == VA_STATUS_SUCCESS;
+            if (timings != nullptr) {
+                timings->syncMs = elapsedMs(syncStartNs);
+            }
         }
 
         return renderStatus == VA_STATUS_SUCCESS && endStatus == VA_STATUS_SUCCESS && syncOk;
