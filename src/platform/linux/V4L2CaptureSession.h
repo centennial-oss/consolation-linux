@@ -12,8 +12,11 @@
 #include <array>
 #include <atomic>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace consolation::platform::linux {
@@ -36,6 +39,8 @@ public:
 
     Q_INVOKABLE void finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame);
     Q_INVOKABLE void recordDmaFramePresented(int bytesUsed);
+    // Decode-side telemetry, posted from the MJPEG decode worker so it is applied on the capture thread.
+    Q_INVOKABLE void recordVaapiDmaDecodeTelemetry(double decodeMs);
 
 private:
     struct Buffer {
@@ -51,12 +56,35 @@ private:
         quint64 traceSeq = 0;
     };
 
+    // Newest compressed MJPEG payload handed from the capture thread to the decode worker (item 4).
+    // The capture thread copies the payload (so the V4L2 buffer can be requeued immediately) and
+    // overwrites any not-yet-decoded job — depth-one, newest wins.
+    struct MjpegDecodeJob {
+        std::vector<uint8_t> payload;
+        int bytesUsed = 0;
+        qint64 capturedAtNs = 0;
+        qint64 wakeAtNs = 0;
+        quint64 traceSeq = 0; // frame-trace join key (0 when tracing disabled)
+        int captureBufferIndex = -1;
+    };
+
     void handleReadyRead();
     void drainRequeuePending();
     [[nodiscard]] capture::DmaBufFrameHandle makeDmaBufFrameHandle(const v4l2_buffer &buffer);
     [[nodiscard]] capture::DmaBufFrameHandle makeVaapiMjpegDmaFrameHandle(
-        const v4l2_buffer &buffer,
-        const mjpeg_backend::VaapiDmaFrame &decoded);
+        const mjpeg_backend::VaapiDmaFrame &decoded,
+        const MjpegDecodeJob &job);
+    void startMjpegDecodeWorker();
+    void stopMjpegDecodeWorker();
+    void mjpegDecodeLoop();
+    void decodeMjpegJob(MjpegDecodeJob &job);
+    void queueMjpegForDecode(
+        const uchar *payload,
+        int bytesUsed,
+        qint64 capturedAtNs,
+        qint64 wakeAtNs,
+        quint64 traceSeq,
+        int captureBufferIndex);
     void requeueCaptureBuffer(int bufferIndex);
     void noteRequeueRequested(int bufferIndex);
     [[nodiscard]] bool useDmaBufDisplayPath() const;
@@ -107,6 +135,21 @@ private:
     bool dmaBufHandleFailureLogged_ = false;
     bool dmaBufWarmupSkipLogged_ = false;
     QSocketNotifier *notifier_ = nullptr;
+
+    // MJPEG VA-API decode worker (items 4-5). Decode (VA submit/sync/export) runs here instead of on
+    // the capture/notifier thread, so it cannot delay the next V4L2 dequeue. The VA decoder is
+    // initialized and destroyed on the capture thread while the worker is stopped, and only ever
+    // *decoded* on the worker, so libva is never accessed concurrently.
+    std::thread mjpegWorker_;
+    std::mutex mjpegMutex_;
+    std::condition_variable mjpegCv_;
+    MjpegDecodeJob mjpegJob_;       // newest pending job (guarded by mjpegMutex_)
+    MjpegDecodeJob mjpegWorkerJob_; // worker-local scratch, swapped under lock to reuse the buffer
+    bool mjpegJobValid_ = false;    // guarded by mjpegMutex_
+    bool mjpegWorkerStop_ = false;  // guarded by mjpegMutex_
+    // Set by the worker if VA decode/export fails at runtime; the capture thread then falls back to the
+    // CPU MJPEG path and the worker parks (so the decoder is never used from both threads at once).
+    std::atomic<bool> vaapiMjpegDmaRuntimeFailed_ { false };
 
     // Frame-trace buffer-lifetime counters (CONSOLATION_FRAME_TRACE). All cross capture/UI threads.
     static constexpr std::size_t kTraceCaptureBufferSlots = 32;
