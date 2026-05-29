@@ -466,6 +466,7 @@ public:
         finishDmaBufReadIfActive();
         dmaFrame_.reset();
         clearBoundDmaIdentity();
+        clearAllSlotBindings(); // EGLImages are torn down below; persistent-slot records must not survive
         if (!nv12Gl_.has_value() && !rgbGl_.has_value() && !yuyvGl_.has_value() && !i420Gl_.has_value()) {
             return;
         }
@@ -787,9 +788,12 @@ private:
         int bufferIndex = -1;
         int rendererIndex = -1;
         int dmaSyncFd = -1;
+        bool persistentSlot = false;
     };
     static constexpr std::size_t kMaxPendingReleases = 4;
     static constexpr quint64 kFenceDrainTimeoutNs = 50'000'000; // 50 ms safety cap for blocking waits
+    static constexpr int kRendererSlotCount = 64;
+    std::array<bool, kRendererSlotCount> slotHasLiveBinding_ {};
 
     void releaseRendererFrame(const int rendererIndex)
     {
@@ -821,7 +825,7 @@ private:
     // Synchronous fallback used when GPU fences are unavailable: drain the GPU with glFinish() and
     // return the V4L2 buffer immediately. This blocks the UI thread (the hitch this path optimizes
     // away when fences are present).
-    void completeDmaPresent(const int bufferIndex, qint64 *glFinishNs = nullptr)
+    void completeDmaPresent(const int bufferIndex, const bool persistentSlot, qint64 *glFinishNs = nullptr)
     {
         if (context() != nullptr) {
             if (auto *gl = context()->functions()) {
@@ -840,7 +844,10 @@ private:
         clearBoundDmaIdentity();
 
         releaseRendererFrame(activeGlRenderer_);
-        invalidateRendererSlot(activeGlRenderer_, bufferIndex);
+        if (!persistentSlot) {
+            invalidateRendererSlot(activeGlRenderer_, bufferIndex);
+            markSlotBinding(bufferIndex, false);
+        }
     }
 
     // Fence-based completion: submit a GPU fence after draw and return without blocking. The frame's
@@ -848,7 +855,7 @@ private:
     // the next paintGL or by fenceTimer_. Falls back to completeDmaPresent() when fences are
     // unavailable or fence creation fails. *gpuSubmitNs (when requested) reports the cost of inserting
     // the fence — near zero — versus the blocking glFinish() it replaces.
-    void completeDmaPresentFenced(const int bufferIndex, qint64 *gpuSubmitNs = nullptr)
+    void completeDmaPresentFenced(const int bufferIndex, const bool persistentSlot, qint64 *gpuSubmitNs = nullptr)
     {
         void *fence = nullptr;
         if (fencesAvailable_ && context() != nullptr) {
@@ -863,7 +870,7 @@ private:
         }
 
         if (fence == nullptr) {
-            completeDmaPresent(bufferIndex, gpuSubmitNs);
+            completeDmaPresent(bufferIndex, persistentSlot, gpuSubmitNs);
             return;
         }
 
@@ -876,6 +883,7 @@ private:
         pending.bufferIndex = bufferIndex;
         pending.rendererIndex = activeGlRenderer_;
         pending.dmaSyncFd = dmaSyncFd_; // transfer the active dma-buf read; END it at finalize
+        pending.persistentSlot = persistentSlot;
         dmaSyncFd_ = -1;
 
         releaseRendererFrame(activeGlRenderer_);
@@ -895,9 +903,30 @@ private:
             deleteSyncFn_(pending.fence);
         }
         pending.fence = nullptr;
-        invalidateRendererSlot(pending.rendererIndex, pending.bufferIndex);
+        if (!pending.persistentSlot) {
+            invalidateRendererSlot(pending.rendererIndex, pending.bufferIndex);
+            markSlotBinding(pending.bufferIndex, false);
+        }
         platform::linux::dmaBufEndRead(pending.dmaSyncFd);
         pending.frame.reset(); // deleter requeues the V4L2 buffer
+    }
+
+    void markSlotBinding(const int bufferIndex, const bool live)
+    {
+        if (bufferIndex >= 0 && bufferIndex < kRendererSlotCount) {
+            slotHasLiveBinding_[static_cast<std::size_t>(bufferIndex)] = live;
+        }
+    }
+
+    [[nodiscard]] bool slotBindingLive(const int bufferIndex) const
+    {
+        return bufferIndex >= 0 && bufferIndex < kRendererSlotCount &&
+            slotHasLiveBinding_[static_cast<std::size_t>(bufferIndex)];
+    }
+
+    void clearAllSlotBindings()
+    {
+        slotHasLiveBinding_.fill(false);
     }
 
     // Requires a current GL context (called from paintGL/finalize paths).
@@ -989,6 +1018,9 @@ private:
 
         const auto &frame = *dmaFrame_;
         const auto needsBind = !isBoundToDmaFrame(frame);
+        const auto frameBufferIndex = frame.bufferIndex;
+        const bool framePersistent = frame.origin == capture::DmaBufOrigin::V4L2Capture;
+        const bool slotWasLive = framePersistent && slotBindingLive(frameBufferIndex);
 
         const auto traceEnabled = platform::linux::frame_trace::enabled();
         const auto paintStartNs = traceEnabled ? capture::monotonicClockNs() : qint64{0};
@@ -1011,6 +1043,7 @@ private:
                 return false;
             }
             setBoundDmaIdentity(frame);
+            markSlotBinding(frameBufferIndex, true);
             if (traceEnabled) {
                 bindNs = capture::monotonicClockNs() - bindStartNs;
             }
@@ -1025,10 +1058,9 @@ private:
         }
         notifyFirstFramePainted();
         qint64 glFinishNs = 0;
-        const auto frameBufferIndex = frame.bufferIndex;
         // NOTE: dmaFrame_ may be moved into the pending-release queue here; do not touch `frame`
         // (a reference into dmaFrame_) after this call.
-        completeDmaPresentFenced(frameBufferIndex, traceEnabled ? &glFinishNs : nullptr);
+        completeDmaPresentFenced(frameBufferIndex, framePersistent, traceEnabled ? &glFinishNs : nullptr);
         const auto presentedNs = capture::monotonicClockNs();
         reportFramePresented(presentedNs);
 
@@ -1042,7 +1074,7 @@ private:
             if (traceEmittedAtNs != 0) {
                 span.emitToPaintMs = static_cast<double>(paintStartNs - traceEmittedAtNs) / 1'000'000.0;
             }
-            span.eglReused = !needsBind;
+            span.eglReused = slotWasLive;
             span.eglBindMs = static_cast<double>(bindNs) / 1'000'000.0;
             span.drawMs = static_cast<double>(drawNs) / 1'000'000.0;
             span.glFinishMs = static_cast<double>(glFinishNs) / 1'000'000.0;
