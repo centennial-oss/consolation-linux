@@ -102,7 +102,7 @@ private:
     [[nodiscard]] capture::FrameHandle decodeMjpeg(const uchar *data, int bytesUsed);
     [[nodiscard]] QImage *writableFramePixels(const capture::FrameHandle &frame);
     void recordDecodedFrame(int bytesUsed, qint64 decodeNs, bool dmaBufPath);
-    void releaseVaapiMjpegDmaResources(int vaapiSlotIndex, const std::array<int, 2> &planeFds);
+    void releaseVaapiMjpegDmaResources(int vaapiSlotIndex);
     [[nodiscard]] bool frameReadyForDmaDisplay(int bytesUsed, __u32 bufferFlags) const;
     void cleanupBuffers();
     void closeDevice();

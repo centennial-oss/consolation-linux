@@ -983,9 +983,7 @@ bool V4L2CaptureSession::useVaapiMjpegDmaPath() const
         (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) && vaapiMjpegDmaPool_ != nullptr;
 }
 
-void V4L2CaptureSession::releaseVaapiMjpegDmaResources(
-    const int vaapiSlotIndex,
-    const std::array<int, 2> &planeFds)
+void V4L2CaptureSession::releaseVaapiMjpegDmaResources(const int vaapiSlotIndex)
 {
     if (frame_trace::enabled()) {
         const auto releaseNs = capture::monotonicClockNs();
@@ -1004,11 +1002,6 @@ void V4L2CaptureSession::releaseVaapiMjpegDmaResources(
         frame_trace::recordBufferLifetime(span);
     }
 
-    for (const auto fd : planeFds) {
-        if (fd >= 0) {
-            ::close(fd);
-        }
-    }
     mjpegDecoder_.releaseDmaSlot(vaapiSlotIndex);
 }
 
@@ -1068,16 +1061,9 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeVaapiMjpegDmaFrameHandle(
     const QPointer<V4L2CaptureSession> session(this);
     return capture::DmaBufFrameHandle(
         &slot,
-        [pool = std::move(pool), vaapiSlotIndex, session, planeFds = decoded.planeFds](
-            capture::DmaBufFrame *) {
+        [pool = std::move(pool), vaapiSlotIndex, session](capture::DmaBufFrame *) {
             if (session) {
-                session->releaseVaapiMjpegDmaResources(vaapiSlotIndex, planeFds);
-            } else {
-                for (const auto fd : planeFds) {
-                    if (fd >= 0) {
-                        ::close(fd);
-                    }
-                }
+                session->releaseVaapiMjpegDmaResources(vaapiSlotIndex);
             }
         });
 }

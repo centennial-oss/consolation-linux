@@ -1019,7 +1019,9 @@ private:
         const auto &frame = *dmaFrame_;
         const auto needsBind = !isBoundToDmaFrame(frame);
         const auto frameBufferIndex = frame.bufferIndex;
-        const bool framePersistent = frame.origin == capture::DmaBufOrigin::V4L2Capture;
+        // are exported once per VA slot and the FD reused.
+        const bool framePersistent = frame.origin == capture::DmaBufOrigin::V4L2Capture ||
+            frame.origin == capture::DmaBufOrigin::VaapiMjpeg;
         const bool slotWasLive = framePersistent && slotBindingLive(frameBufferIndex);
 
         const auto traceEnabled = platform::linux::frame_trace::enabled();

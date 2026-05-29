@@ -332,6 +332,22 @@ struct VaapiDecoder::Impl {
     int exportImageWidth_ = 0;
     int exportImageHeight_ = 0;
 
+    struct ExportedSlot {
+        bool valid = false;
+        std::array<int, 2> planeFds { -1, -1 };
+        std::array<int, 2> planeOffsets { 0, 0 };
+        std::array<int, 2> planeStrides { 0, 0 };
+        std::array<uint32_t, 2> planeFourccs { 0, 0 };
+        std::array<uint64_t, 2> planeModifiers { ~uint64_t { 0 }, ~uint64_t { 0 } };
+        int stride = 0;
+    };
+    std::array<ExportedSlot, kSurfacePoolSize> exportedSlots_ {};
+
+    ~Impl()
+    {
+        release();
+    }
+
     VABufferID pictureBuffer_ = VA_INVALID_ID;
     VABufferID iqBuffer_ = VA_INVALID_ID;
     VABufferID huffmanBuffer_ = VA_INVALID_ID;
@@ -374,9 +390,25 @@ struct VaapiDecoder::Impl {
         exportImageHeight_ = 0;
     }
 
+    // Close all cached per-slot export FDs. Call whenever the underlying surfaces go away so we never
+    // hand out an FD that backs a destroyed surface.
+    void releaseExportedSlots()
+    {
+        for (auto &slot : exportedSlots_) {
+            for (auto &fd : slot.planeFds) {
+                if (fd >= 0) {
+                    ::close(fd);
+                    fd = -1;
+                }
+            }
+            slot = {};
+        }
+    }
+
     void release()
     {
         releaseExportImage();
+        releaseExportedSlots();
         releaseVaTableBuffers();
 
         slotInUseMask_.store(0, std::memory_order_release);
@@ -415,6 +447,7 @@ struct VaapiDecoder::Impl {
         }
 
         releaseExportImage();
+        releaseExportedSlots();
         releaseVaTableBuffers();
         slotInUseMask_.store(0, std::memory_order_release);
 
@@ -785,77 +818,87 @@ struct VaapiDecoder::Impl {
 
     [[nodiscard]] bool exportSurfaceDma(
         const VASurfaceID targetSurface,
+        const int slotIndex,
         const int cropWidth,
         const int cropHeight,
-        VaapiDmaFrame &out) const
+        VaapiDmaFrame &out)
     {
         out.dmaFd = -1;
         out.planeFds = { -1, -1 };
         out.stride = 0;
-        if (!dmaExportSupported_ || targetSurface == VA_INVALID_ID) {
+        if (!dmaExportSupported_ || targetSurface == VA_INVALID_ID || slotIndex < 0 ||
+            slotIndex >= kSurfacePoolSize) {
             return false;
         }
 
-        VADRMPRIMESurfaceDescriptor descriptor {};
-        if (vaExportSurfaceHandle(
-                display,
-                targetSurface,
-                VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
-                &descriptor) != VA_STATUS_SUCCESS) {
-            return false;
-        }
-
-        if (descriptor.num_layers < 2 || descriptor.num_objects < 1) {
-            closePrimeDescriptor(descriptor);
-            return false;
-        }
-
-        const auto &yLayer = descriptor.layers[0];
-        const auto &uvLayer = descriptor.layers[1];
-        if (yLayer.num_planes < 1 || uvLayer.num_planes < 1 ||
-            yLayer.object_index[0] >= descriptor.num_objects ||
-            uvLayer.object_index[0] >= descriptor.num_objects) {
-            closePrimeDescriptor(descriptor);
-            return false;
-        }
-
-        const auto yObjectIndex = yLayer.object_index[0];
-        const auto uvObjectIndex = uvLayer.object_index[0];
-        const auto yObjectFd = descriptor.objects[yObjectIndex].fd;
-        const auto uvObjectFd = descriptor.objects[uvObjectIndex].fd;
-        if (yObjectFd < 0 || uvObjectFd < 0) {
-            closePrimeDescriptor(descriptor);
-            return false;
-        }
-
-        auto dupFd = ::dup(yObjectFd);
-        const auto dupUvFd = ::dup(uvObjectFd);
-        if (dupFd < 0 || dupUvFd < 0) {
-            if (dupFd >= 0) {
-                ::close(dupFd);
-                dupFd = -1;
+        auto &cached = exportedSlots_[static_cast<size_t>(slotIndex)];
+        if (!cached.valid) {
+            VADRMPRIMESurfaceDescriptor descriptor {};
+            if (vaExportSurfaceHandle(
+                    display,
+                    targetSurface,
+                    VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                    VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                    &descriptor) != VA_STATUS_SUCCESS) {
+                return false;
             }
-            if (dupUvFd >= 0) {
-                ::close(dupUvFd);
-            }
-            closePrimeDescriptor(descriptor);
-            return false;
-        }
-        closePrimeDescriptor(descriptor);
 
-        out.dmaFd = dupFd;
-        out.stride = static_cast<int>(yLayer.pitch[0]);
-        out.planeFds[0] = dupFd;
-        out.planeFds[1] = dupUvFd;
-        out.planeOffsets[0] = static_cast<int>(yLayer.offset[0]);
-        out.planeOffsets[1] = static_cast<int>(uvLayer.offset[0]);
-        out.planeStrides[0] = static_cast<int>(yLayer.pitch[0]);
-        out.planeStrides[1] = static_cast<int>(uvLayer.pitch[0]);
-        out.planeFourccs[0] = yLayer.drm_format;
-        out.planeFourccs[1] = uvLayer.drm_format;
-        out.planeModifiers[0] = descriptor.objects[yObjectIndex].drm_format_modifier;
-        out.planeModifiers[1] = descriptor.objects[uvObjectIndex].drm_format_modifier;
+            if (descriptor.num_layers < 2 || descriptor.num_objects < 1) {
+                closePrimeDescriptor(descriptor);
+                return false;
+            }
+
+            const auto &yLayer = descriptor.layers[0];
+            const auto &uvLayer = descriptor.layers[1];
+            if (yLayer.num_planes < 1 || uvLayer.num_planes < 1 ||
+                yLayer.object_index[0] >= descriptor.num_objects ||
+                uvLayer.object_index[0] >= descriptor.num_objects) {
+                closePrimeDescriptor(descriptor);
+                return false;
+            }
+
+            const auto yObjectIndex = yLayer.object_index[0];
+            const auto uvObjectIndex = uvLayer.object_index[0];
+            const auto yObjectFd = descriptor.objects[yObjectIndex].fd;
+            const auto uvObjectFd = descriptor.objects[uvObjectIndex].fd;
+            if (yObjectFd < 0 || uvObjectFd < 0) {
+                closePrimeDescriptor(descriptor);
+                return false;
+            }
+
+            auto dupFd = ::dup(yObjectFd);
+            const auto dupUvFd = ::dup(uvObjectFd);
+            if (dupFd < 0 || dupUvFd < 0) {
+                if (dupFd >= 0) {
+                    ::close(dupFd);
+                }
+                if (dupUvFd >= 0) {
+                    ::close(dupUvFd);
+                }
+                closePrimeDescriptor(descriptor);
+                return false;
+            }
+
+            cached.planeFds = { dupFd, dupUvFd };
+            cached.planeOffsets = { static_cast<int>(yLayer.offset[0]), static_cast<int>(uvLayer.offset[0]) };
+            cached.planeStrides = { static_cast<int>(yLayer.pitch[0]), static_cast<int>(uvLayer.pitch[0]) };
+            cached.planeFourccs = { yLayer.drm_format, uvLayer.drm_format };
+            cached.planeModifiers = {
+                descriptor.objects[yObjectIndex].drm_format_modifier,
+                descriptor.objects[uvObjectIndex].drm_format_modifier,
+            };
+            cached.stride = static_cast<int>(yLayer.pitch[0]);
+            cached.valid = true;
+            closePrimeDescriptor(descriptor);
+        }
+
+        out.dmaFd = cached.planeFds[0];
+        out.planeFds = cached.planeFds;
+        out.planeOffsets = cached.planeOffsets;
+        out.planeStrides = cached.planeStrides;
+        out.planeFourccs = cached.planeFourccs;
+        out.planeModifiers = cached.planeModifiers;
+        out.stride = cached.stride;
         return out.dmaFd >= 0 && out.stride > 0 && cropWidth > 0 && cropHeight > 0;
     }
 
@@ -1126,12 +1169,7 @@ struct VaapiDecoder::Impl {
         }
 
         const auto exportStartNs = needParseTime ? consolation::capture::monotonicClockNs() : 0;
-        if (!exportSurfaceDma(targetSurface, frameWidth, frameHeight, out)) {
-            for (const auto fd : out.planeFds) {
-                if (fd >= 0) {
-                    ::close(fd);
-                }
-            }
+        if (!exportSurfaceDma(targetSurface, slotIndex, frameWidth, frameHeight, out)) {
             releaseSlot(slotIndex);
             return false;
         }
