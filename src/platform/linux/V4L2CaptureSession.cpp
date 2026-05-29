@@ -541,6 +541,8 @@ void V4L2CaptureSession::handleReadyRead()
                             span.path = "vaapi-mjpeg-dma";
                             frame_trace::recordCapture(span);
                         }
+                        dmaFrame->publishSeq = ++dmaPublishSeq_;
+                        latestDmaSeq.store(dmaPublishSeq_, std::memory_order_release);
                         emit dmaFrameReady(std::move(dmaFrame));
                         return;
                     }
@@ -586,6 +588,8 @@ void V4L2CaptureSession::handleReadyRead()
                         span.path = "v4l2-dma";
                         frame_trace::recordCapture(span);
                     }
+                    dmaFrame->publishSeq = ++dmaPublishSeq_;
+                    latestDmaSeq.store(dmaPublishSeq_, std::memory_order_release);
                     emit dmaFrameReady(std::move(dmaFrame));
                     return;
                 }

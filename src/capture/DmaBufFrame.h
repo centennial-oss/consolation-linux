@@ -52,6 +52,10 @@ struct DmaBufFrame {
     // frame, so the renderer can measure emit-to-paint delivery latency.
     quint64 seq = 0;
     qint64 emittedAtNs = 0;
+    // Always-populated monotonic id of this published dma frame (independent of frame-trace seq).
+    // The UI thread uses it for "newest frame wins" coalescing: a delivered frame whose publishSeq
+    // is older than CaptureSession::latestDmaSeq is dropped because a newer frame is already queued.
+    quint64 publishSeq = 0;
 };
 
 using DmaBufFrameHandle = std::shared_ptr<DmaBufFrame>;

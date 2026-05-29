@@ -111,6 +111,8 @@ private:
     // Frame-trace buffer-lifetime counters (CONSOLATION_FRAME_TRACE). All cross capture/UI threads.
     static constexpr std::size_t kTraceCaptureBufferSlots = 32;
     static constexpr std::size_t kTraceVaapiSlots = 8;
+    // Capture-thread-only counter feeding DmaBufFrame::publishSeq / latestDmaSeq for UI coalescing.
+    quint64 dmaPublishSeq_ = 0;
     std::atomic<int> outstandingCaptureBuffers_ { 0 };
     std::atomic<int> outstandingVaapiSlots_ { 0 };
     std::array<std::atomic<qint64>, kTraceCaptureBufferSlots> requeueRequestedNs_ {};

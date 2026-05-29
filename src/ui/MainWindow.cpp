@@ -85,12 +85,34 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <set>
 #include <vector>
 
 #include <libyuv/scale_argb.h>
 
 namespace consolation::ui {
+
+// GL sync-object (GL_ARB_sync / GLES3) entry points and tokens, resolved at runtime via
+// QOpenGLContext::getProcAddress. Declared locally so we do not depend on a GLES3 / desktop-GL
+// header being present; the renderer falls back to glFinish() when these cannot be resolved.
+#ifndef GL_SYNC_GPU_COMMANDS_COMPLETE
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#endif
+#ifndef GL_ALREADY_SIGNALED
+#define GL_ALREADY_SIGNALED 0x911A
+#endif
+#ifndef GL_CONDITION_SATISFIED
+#define GL_CONDITION_SATISFIED 0x911C
+#endif
+#ifndef GL_SYNC_FLUSH_COMMANDS_BIT
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#endif
+
+// GLsync is an opaque pointer; void* matches its ABI.
+using GlFenceSyncFn = void *(*)(unsigned int condition, unsigned int flags);
+using GlClientWaitSyncFn = unsigned int (*)(void *sync, unsigned int flags, quint64 timeoutNs);
+using GlDeleteSyncFn = void (*)(void *sync);
 
 // Pre-scale letterboxed CPU frames once per frame (libyuv), not on every QPainter::drawImage.
 struct CpuFrameScaleCache final {
@@ -440,6 +462,7 @@ public:
 
     void releaseDmaGlState()
     {
+        pumpPendingReleases(true, false);
         finishDmaBufReadIfActive();
         dmaFrame_.reset();
         clearBoundDmaIdentity();
@@ -471,6 +494,7 @@ public:
 
     ~GpuFrameRenderer() override
     {
+        pumpPendingReleases(true, false);
         if (context() != nullptr && context()->isValid()) {
             makeCurrent();
             if (nv12Gl_.has_value()) {
@@ -505,6 +529,8 @@ public:
 
     void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0, const qint64 wakeAtNs = 0) override
     {
+        // Leaving the dma path: ensure all in-flight dma buffers are returned before switching.
+        pumpPendingReleases(true, false);
         dmaFrame_.reset();
         clearBoundDmaIdentity();
         switch (activeGlRenderer_) {
@@ -605,11 +631,35 @@ protected:
             std::cout << "; P010 will use libyuv CPU decode" << std::endl;
             std::cout.flush();
         }
+
+        resolveFenceFunctions();
+    }
+
+    // Resolve GL sync-object entry points once the context exists. When unavailable (e.g. a GLES2-only
+    // context) the renderer keeps the blocking glFinish() completion path.
+    void resolveFenceFunctions()
+    {
+        fenceSyncFn_ = nullptr;
+        clientWaitSyncFn_ = nullptr;
+        deleteSyncFn_ = nullptr;
+        fencesAvailable_ = false;
+        if (auto *ctx = context()) {
+            fenceSyncFn_ = reinterpret_cast<GlFenceSyncFn>(ctx->getProcAddress("glFenceSync"));
+            clientWaitSyncFn_ = reinterpret_cast<GlClientWaitSyncFn>(ctx->getProcAddress("glClientWaitSync"));
+            deleteSyncFn_ = reinterpret_cast<GlDeleteSyncFn>(ctx->getProcAddress("glDeleteSync"));
+        }
+        fencesAvailable_ = fenceSyncFn_ != nullptr && clientWaitSyncFn_ != nullptr && deleteSyncFn_ != nullptr;
+        std::cout << "[MainWindow capture] GPU present fences "
+                  << (fencesAvailable_ ? "enabled" : "unavailable; using glFinish") << std::endl;
+        std::cout.flush();
     }
 
     void paintGL() override
     {
         ++paintCount_;
+        // Reap any previously-presented dma frames whose GPU fence has signaled (context is current
+        // here). Keeps the in-flight buffer count low without waiting on a timer when frames flow.
+        pumpPendingReleases(false, true);
         if (dmaFrame_) {
             if (tryPaintDmaFrame()) {
                 return;
@@ -728,7 +778,49 @@ private:
         platform::linux::dmaBufEndRead(dmaSyncFd_);
     }
 
-    // Return the V4L2 buffer to the driver as soon as the GPU has sampled it (see glFinish below).
+    // A dma frame whose GPU draw has been submitted but not yet confirmed complete. The frame handle
+    // (and its slot's EGLImage/textures) is kept alive until the fence signals; then the V4L2 buffer
+    // is requeued and the slot invalidated. This decouples buffer return from blocking glFinish().
+    struct PendingGpuRelease {
+        capture::DmaBufFrameHandle frame;
+        void *fence = nullptr;
+        int bufferIndex = -1;
+        int rendererIndex = -1;
+        int dmaSyncFd = -1;
+    };
+    static constexpr std::size_t kMaxPendingReleases = 4;
+    static constexpr quint64 kFenceDrainTimeoutNs = 50'000'000; // 50 ms safety cap for blocking waits
+
+    void releaseRendererFrame(const int rendererIndex)
+    {
+        switch (rendererIndex) {
+        case 0: if (nv12Gl_) { nv12Gl_->releaseFrame(); } break;
+        case 1: if (rgbGl_)  { rgbGl_->releaseFrame(); }  break;
+        case 2: if (yuyvGl_) { yuyvGl_->releaseFrame(); } break;
+        case 3: if (i420Gl_) { i420Gl_->releaseFrame(); } break;
+        case 4: if (p010Gl_) { p010Gl_->releaseFrame(); } break;
+        default: break;
+        }
+    }
+
+    void invalidateRendererSlot(const int rendererIndex, const int bufferIndex)
+    {
+        if (bufferIndex < 0) {
+            return;
+        }
+        switch (rendererIndex) {
+        case 0: if (nv12Gl_) { nv12Gl_->invalidateSlot(bufferIndex); } break;
+        case 1: if (rgbGl_)  { rgbGl_->invalidateSlot(bufferIndex); }  break;
+        case 2: if (yuyvGl_) { yuyvGl_->invalidateSlot(bufferIndex); } break;
+        case 3: if (i420Gl_) { i420Gl_->invalidateSlot(bufferIndex); } break;
+        case 4: if (p010Gl_) { p010Gl_->invalidateSlot(bufferIndex); } break;
+        default: break;
+        }
+    }
+
+    // Synchronous fallback used when GPU fences are unavailable: drain the GPU with glFinish() and
+    // return the V4L2 buffer immediately. This blocks the UI thread (the hitch this path optimizes
+    // away when fences are present).
     void completeDmaPresent(const int bufferIndex, qint64 *glFinishNs = nullptr)
     {
         if (context() != nullptr) {
@@ -747,49 +839,144 @@ private:
         dmaFrame_.reset();
         clearBoundDmaIdentity();
 
-        switch (activeGlRenderer_) {
-        case 0:
-            if (nv12Gl_) {
-                nv12Gl_->releaseFrame();
-                if (bufferIndex >= 0) {
-                    nv12Gl_->invalidateSlot(bufferIndex);
+        releaseRendererFrame(activeGlRenderer_);
+        invalidateRendererSlot(activeGlRenderer_, bufferIndex);
+    }
+
+    // Fence-based completion: submit a GPU fence after draw and return without blocking. The frame's
+    // V4L2 buffer is requeued (and the slot invalidated) only once the fence signals, polled either at
+    // the next paintGL or by fenceTimer_. Falls back to completeDmaPresent() when fences are
+    // unavailable or fence creation fails. *gpuSubmitNs (when requested) reports the cost of inserting
+    // the fence — near zero — versus the blocking glFinish() it replaces.
+    void completeDmaPresentFenced(const int bufferIndex, qint64 *gpuSubmitNs = nullptr)
+    {
+        void *fence = nullptr;
+        if (fencesAvailable_ && context() != nullptr) {
+            if (auto *gl = context()->functions()) {
+                const auto startNs = gpuSubmitNs != nullptr ? capture::monotonicClockNs() : qint64{0};
+                gl->glFlush(); // ensure the fence is reachable in the command stream
+                fence = fenceSyncFn_(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                if (gpuSubmitNs != nullptr) {
+                    *gpuSubmitNs = capture::monotonicClockNs() - startNs;
                 }
             }
-            break;
-        case 1:
-            if (rgbGl_) {
-                rgbGl_->releaseFrame();
-                if (bufferIndex >= 0) {
-                    rgbGl_->invalidateSlot(bufferIndex);
-                }
+        }
+
+        if (fence == nullptr) {
+            completeDmaPresent(bufferIndex, gpuSubmitNs);
+            return;
+        }
+
+        // The draw is recorded; drop the renderer's frame reference now but keep the slot's
+        // EGLImage/textures alive (they are still being sampled by the in-flight GPU work). The slot
+        // is invalidated and the buffer requeued at finalize, after the fence signals.
+        PendingGpuRelease pending;
+        pending.frame = std::move(dmaFrame_);
+        pending.fence = fence;
+        pending.bufferIndex = bufferIndex;
+        pending.rendererIndex = activeGlRenderer_;
+        pending.dmaSyncFd = dmaSyncFd_; // transfer the active dma-buf read; END it at finalize
+        dmaSyncFd_ = -1;
+
+        releaseRendererFrame(activeGlRenderer_);
+        clearBoundDmaIdentity();
+
+        if (pendingReleases_.size() >= kMaxPendingReleases) {
+            // Bound in-flight buffers/slots; the oldest fence is almost always already signaled.
+            finalizeFrontReleaseBlocking();
+        }
+        pendingReleases_.push_back(std::move(pending));
+        armFenceTimer();
+    }
+
+    void finalizeRelease(PendingGpuRelease &pending)
+    {
+        if (pending.fence != nullptr && deleteSyncFn_ != nullptr) {
+            deleteSyncFn_(pending.fence);
+        }
+        pending.fence = nullptr;
+        invalidateRendererSlot(pending.rendererIndex, pending.bufferIndex);
+        platform::linux::dmaBufEndRead(pending.dmaSyncFd);
+        pending.frame.reset(); // deleter requeues the V4L2 buffer
+    }
+
+    // Requires a current GL context (called from paintGL/finalize paths).
+    void finalizeFrontReleaseBlocking()
+    {
+        if (pendingReleases_.empty()) {
+            return;
+        }
+        auto &pending = pendingReleases_.front();
+        if (pending.fence != nullptr && clientWaitSyncFn_ != nullptr) {
+            clientWaitSyncFn_(pending.fence, GL_SYNC_FLUSH_COMMANDS_BIT, kFenceDrainTimeoutNs);
+        }
+        finalizeRelease(pending);
+        pendingReleases_.pop_front();
+    }
+
+    // Poll outstanding fences and finalize any that have signaled. forceDrain blocks (bounded) on each
+    // remaining fence — used on teardown so every V4L2 buffer is returned. When contextAlreadyCurrent
+    // is false (timer callback) the widget's GL context is made current for the GL sync calls.
+    void pumpPendingReleases(const bool forceDrain, const bool contextAlreadyCurrent)
+    {
+        if (pendingReleases_.empty()) {
+            return;
+        }
+
+        if (context() == nullptr || !context()->isValid()) {
+            // No usable GL context (lost/teardown): release without a GPU wait so buffers still return.
+            for (auto &pending : pendingReleases_) {
+                pending.fence = nullptr;
+                platform::linux::dmaBufEndRead(pending.dmaSyncFd);
+                pending.frame.reset();
             }
-            break;
-        case 2:
-            if (yuyvGl_) {
-                yuyvGl_->releaseFrame();
-                if (bufferIndex >= 0) {
-                    yuyvGl_->invalidateSlot(bufferIndex);
-                }
+            pendingReleases_.clear();
+            return;
+        }
+
+        const bool needCurrent = !contextAlreadyCurrent;
+        if (needCurrent) {
+            makeCurrent();
+        }
+
+        while (!pendingReleases_.empty()) {
+            auto &pending = pendingReleases_.front();
+            bool done = false;
+            if (pending.fence == nullptr || clientWaitSyncFn_ == nullptr) {
+                done = true;
+            } else if (forceDrain) {
+                clientWaitSyncFn_(pending.fence, GL_SYNC_FLUSH_COMMANDS_BIT, kFenceDrainTimeoutNs);
+                done = true;
+            } else {
+                const auto result = clientWaitSyncFn_(pending.fence, 0, 0);
+                done = (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED);
             }
-            break;
-        case 3:
-            if (i420Gl_) {
-                i420Gl_->releaseFrame();
-                if (bufferIndex >= 0) {
-                    i420Gl_->invalidateSlot(bufferIndex);
-                }
+            if (!done) {
+                break;
             }
-            break;
-        case 4:
-            if (p010Gl_) {
-                p010Gl_->releaseFrame();
-                if (bufferIndex >= 0) {
-                    p010Gl_->invalidateSlot(bufferIndex);
-                }
-            }
-            break;
-        default:
-            break;
+            finalizeRelease(pending);
+            pendingReleases_.pop_front();
+        }
+
+        if (needCurrent) {
+            doneCurrent();
+        }
+
+        if (!pendingReleases_.empty()) {
+            armFenceTimer();
+        }
+    }
+
+    void armFenceTimer()
+    {
+        if (fenceTimer_ == nullptr) {
+            fenceTimer_ = new QTimer(this);
+            fenceTimer_->setSingleShot(true);
+            fenceTimer_->setTimerType(Qt::PreciseTimer);
+            connect(fenceTimer_, &QTimer::timeout, this, [this]() { pumpPendingReleases(false, false); });
+        }
+        if (!fenceTimer_->isActive()) {
+            fenceTimer_->start(1);
         }
     }
 
@@ -838,7 +1025,10 @@ private:
         }
         notifyFirstFramePainted();
         qint64 glFinishNs = 0;
-        completeDmaPresent(frame.bufferIndex, traceEnabled ? &glFinishNs : nullptr);
+        const auto frameBufferIndex = frame.bufferIndex;
+        // NOTE: dmaFrame_ may be moved into the pending-release queue here; do not touch `frame`
+        // (a reference into dmaFrame_) after this call.
+        completeDmaPresentFenced(frameBufferIndex, traceEnabled ? &glFinishNs : nullptr);
         const auto presentedNs = capture::monotonicClockNs();
         reportFramePresented(presentedNs);
 
@@ -936,6 +1126,13 @@ private:
     int boundDmaFd_ = -1;
     int dmaSyncFd_ = -1;
     capture::DmaBufLayout boundDmaLayout_ = capture::DmaBufLayout::Unknown;
+    GlFenceSyncFn fenceSyncFn_ = nullptr;
+    GlClientWaitSyncFn clientWaitSyncFn_ = nullptr;
+    GlDeleteSyncFn deleteSyncFn_ = nullptr;
+    bool fencesAvailable_ = false;
+    std::deque<PendingGpuRelease> pendingReleases_;
+    QTimer *fenceTimer_ = nullptr;
+
     DmaGlFailedHandler dmaGlFailedHandler_;
     DmaCpuFallbackHandler dmaCpuFallbackHandler_;
     DmaPresentedHandler dmaPresentedHandler_;
@@ -2485,6 +2682,15 @@ void MainWindow::startPlayback()
             return;
         }
         if (!frame) {
+            return;
+        }
+        // Newest-frame coalescing: if the capture thread has already published a newer dma frame
+        // (queued behind this one while the UI thread was busy), drop this stale one now. Letting the
+        // handle fall out of scope requeues its V4L2 buffer immediately instead of paying a full
+        // paint + GPU present on a frame we are about to supersede. The newest frame in any burst
+        // always satisfies publishSeq == latestDmaSeq, so it still presents synchronously.
+        if (captureSession_ && frame->publishSeq != 0 &&
+            frame->publishSeq < captureSession_->latestDmaSeq.load(std::memory_order_acquire)) {
             return;
         }
         if (!videoSurface_) {
