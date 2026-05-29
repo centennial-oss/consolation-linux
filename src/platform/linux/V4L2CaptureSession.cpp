@@ -937,8 +937,8 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
     snapshot.dmaCapturePathEnabled = useDmaBufDisplayPath();
     snapshot.mjpegDecodePath = telemetryLastMjpegPath_;
     snapshot.mjpegHwDecodeActive =
-        telemetryMjpegHwFrameCount_ > 0 &&
-        (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG);
+        (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) &&
+        (telemetryMjpegHwFrameCount_ > 0 || telemetryDmaFrameCount_ > 0);
     if (telemetryDmaFrameCount_ > 0 && telemetryCpuFrameCount_ == 0) {
         snapshot.frameMemory = capture::VideoFrameMemory::DmaBuf;
     } else if (telemetryCpuFrameCount_ > 0 && telemetryDmaFrameCount_ == 0) {
