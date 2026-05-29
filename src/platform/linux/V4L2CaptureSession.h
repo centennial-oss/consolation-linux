@@ -78,6 +78,7 @@ private:
     void stopMjpegDecodeWorker();
     void mjpegDecodeLoop();
     void decodeMjpegJob(MjpegDecodeJob &job);
+    void noteVaapiDmaFailure(const char *reason);
     void queueMjpegForDecode(
         const uchar *payload,
         int bytesUsed,
@@ -147,9 +148,9 @@ private:
     MjpegDecodeJob mjpegWorkerJob_; // worker-local scratch, swapped under lock to reuse the buffer
     bool mjpegJobValid_ = false;    // guarded by mjpegMutex_
     bool mjpegWorkerStop_ = false;  // guarded by mjpegMutex_
-    // Set by the worker if VA decode/export fails at runtime; the capture thread then falls back to the
-    // CPU MJPEG path and the worker parks (so the decoder is never used from both threads at once).
     std::atomic<bool> vaapiMjpegDmaRuntimeFailed_ { false };
+    int mjpegConsecutiveDmaFailures_ = 0; // worker-thread only; reset on each successful decode
+    static constexpr int kMaxConsecutiveVaapiDmaFailures = 30;
 
     // Frame-trace buffer-lifetime counters (CONSOLATION_FRAME_TRACE). All cross capture/UI threads.
     static constexpr std::size_t kTraceCaptureBufferSlots = 32;

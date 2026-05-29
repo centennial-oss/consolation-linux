@@ -496,11 +496,9 @@ void V4L2CaptureSession::handleReadyRead()
         if (useVaapiMjpegDmaPath()) {
             const auto bytesUsed = static_cast<int>(pending.bytesused);
             const auto capturedAtNs = buffers_[pending.index].capturedAtNs;
-            // Hand the newest compressed payload to the decode worker and requeue the V4L2 buffer
-            // immediately. VA submit/sync/export no longer runs on the capture/notifier thread (items
-            // 4-5); copying the payload lets us QBUF now without waiting for libva to consume the source
-            // buffer (item 2, MJPEG path), keeping the capture loop at drain=1.
+            const auto frameUsable = bytesUsed > 0 && (pending.flags & V4L2_BUF_FLAG_ERROR) == 0;
             const auto slotsAvailable = mjpegDecoder_.dmaSlotsAvailable();
+            const auto handoff = frameUsable && slotsAvailable;
             quint64 traceSeq = 0;
             if (traceEnabled) {
                 const auto handoffNs = capture::monotonicClockNs();
@@ -516,12 +514,14 @@ void V4L2CaptureSession::handleReadyRead()
                 span.dqToEmitMs = static_cast<double>(handoffNs - newestDqNs) / 1'000'000.0;
                 span.bytesUsed = bytesUsed;
                 // dq-to-handoff now; decode latency moves to the worker and the present span.
-                span.path = slotsAvailable ? "vaapi-mjpeg-dma-queued" : "vaapi-mjpeg-dma-slot-starved";
+                span.path = !frameUsable ? "vaapi-mjpeg-dma-error-frame"
+                    : slotsAvailable     ? "vaapi-mjpeg-dma-queued"
+                                         : "vaapi-mjpeg-dma-slot-starved";
                 frame_trace::recordCapture(span);
             }
             // Drop the frame when no VA surface slot is free (transient backlog) — the worker always
             // keeps the newest job, so capture stays responsive rather than blocking on decode.
-            if (slotsAvailable) {
+            if (handoff) {
                 queueMjpegForDecode(
                     static_cast<const uchar *>(buffers_[pending.index].start),
                     bytesUsed,
@@ -1083,6 +1083,7 @@ void V4L2CaptureSession::startMjpegDecodeWorker()
         mjpegJobValid_ = false;
     }
     vaapiMjpegDmaRuntimeFailed_.store(false, std::memory_order_release);
+    mjpegConsecutiveDmaFailures_ = 0;
     mjpegWorker_ = std::thread([this]() { mjpegDecodeLoop(); });
 }
 
@@ -1155,26 +1156,19 @@ void V4L2CaptureSession::decodeMjpegJob(MjpegDecodeJob &job)
     const auto decodeStartNs = capture::monotonicClockNs();
     mjpeg_backend::VaapiDmaFrame decoded {};
     if (!mjpegDecoder_.decodeDma(job.payload.data(), job.bytesUsed, decoded)) {
-        vaapiMjpegDmaRuntimeFailed_.store(true, std::memory_order_release);
-        emit logMessage(QStringLiteral(
-            "VA-API MJPEG DMA-BUF decode/export failed; falling back to hardware decode to ARGB CPU-upload path"));
+        noteVaapiDmaFailure("decode/export");
         return;
     }
     const auto decodeMs = static_cast<double>(capture::monotonicClockNs() - decodeStartNs) / 1'000'000.0;
 
     auto dmaFrame = makeVaapiMjpegDmaFrameHandle(decoded, job);
     if (!dmaFrame) {
-        for (const auto fd : decoded.planeFds) {
-            if (fd >= 0) {
-                ::close(fd);
-            }
-        }
         mjpegDecoder_.releaseDmaSlot(decoded.slotIndex);
-        vaapiMjpegDmaRuntimeFailed_.store(true, std::memory_order_release);
-        emit logMessage(QStringLiteral(
-            "VA-API MJPEG DMA-BUF handle creation failed; falling back to hardware decode to ARGB CPU-upload path"));
+        noteVaapiDmaFailure("handle creation");
         return;
     }
+
+    mjpegConsecutiveDmaFailures_ = 0; // a good frame clears any transient-failure streak
 
     if (frame_trace::enabled()) {
         dmaFrame->seq = job.traceSeq;
@@ -1188,6 +1182,25 @@ void V4L2CaptureSession::decodeMjpegJob(MjpegDecodeJob &job)
         this, [this, decodeMs]() { recordVaapiDmaDecodeTelemetry(decodeMs); }, Qt::QueuedConnection);
 
     emit dmaFrameReady(std::move(dmaFrame));
+}
+
+void V4L2CaptureSession::noteVaapiDmaFailure(const char *reason)
+{
+    ++mjpegConsecutiveDmaFailures_;
+    // Tolerate isolated failures
+    if (mjpegConsecutiveDmaFailures_ == 1) {
+        emit logMessage(QStringLiteral("VA-API MJPEG DMA-BUF %1 failed for a frame; retrying (likely a "
+                                       "warmup/corrupt frame after stream start)")
+                            .arg(QString::fromUtf8(reason)));
+    }
+    if (mjpegConsecutiveDmaFailures_ >= kMaxConsecutiveVaapiDmaFailures &&
+        !vaapiMjpegDmaRuntimeFailed_.load(std::memory_order_acquire)) {
+        vaapiMjpegDmaRuntimeFailed_.store(true, std::memory_order_release);
+        emit logMessage(QStringLiteral("VA-API MJPEG DMA-BUF %1 failed on %2 consecutive frames; falling "
+                                       "back to hardware decode to ARGB CPU-upload path")
+                            .arg(QString::fromUtf8(reason))
+                            .arg(mjpegConsecutiveDmaFailures_));
+    }
 }
 
 void V4L2CaptureSession::recordVaapiDmaDecodeTelemetry(const double decodeMs)
