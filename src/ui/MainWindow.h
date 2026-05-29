@@ -33,6 +33,7 @@ public:
     ~MainWindow() override;
 
 protected:
+    void changeEvent(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -71,6 +72,7 @@ private:
     void toggleFullScreen();
     void resizeWindowToVideoScale(double scaleFactor);
     void updateFullScreenToggleButton();
+    void updateStartupExitFullScreenButton();
 
     settings::AppSettings settings_;
     std::vector<capture::CaptureDevice> devices_;
@@ -82,6 +84,7 @@ private:
     QPointer<QLabel> lowFpsWarningOverlay_;
     QPointer<QFrame> playbackControls_;
     QPointer<QPushButton> fullScreenToggleButton_;
+    QPointer<QPushButton> startupExitFullScreenButton_;
     QTimer *controlsHideTimer_ = nullptr;
     QTimer *statsOverlayTimer_ = nullptr;
     QTimer *startupRefreshTimer_ = nullptr;

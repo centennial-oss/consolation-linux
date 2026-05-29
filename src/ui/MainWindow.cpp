@@ -2242,6 +2242,25 @@ void MainWindow::toggleFullScreen()
     }
 
     updateFullScreenToggleButton();
+    updateStartupExitFullScreenButton();
+}
+
+void MainWindow::updateStartupExitFullScreenButton()
+{
+    if (!startupExitFullScreenButton_) {
+        return;
+    }
+
+    startupExitFullScreenButton_->setVisible(isFullScreen());
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::WindowStateChange) {
+        updateStartupExitFullScreenButton();
+    }
+
+    QMainWindow::changeEvent(event);
 }
 
 void MainWindow::resizeWindowToVideoScale(const double scaleFactor)
@@ -2598,6 +2617,20 @@ void MainWindow::buildStoppedState()
 
     auto *buttonRow = new QHBoxLayout();
     buttonRow->setSpacing(14);
+
+    auto *exitFullScreenButton = makePillButton(
+        QIcon(renderIconPixmap(QStringLiteral(":/icons/minimize-2.svg"), QColor(Qt::white), 20)),
+        QStringLiteral("Exit Full Screen"),
+        root);
+    exitFullScreenButton->setVisible(isFullScreen());
+    connect(exitFullScreenButton, &QPushButton::clicked, this, [this]() {
+        if (isFullScreen()) {
+            toggleFullScreen();
+        }
+    });
+    startupExitFullScreenButton_ = exitFullScreenButton;
+
+    buttonRow->addWidget(exitFullScreenButton);
     buttonRow->addStretch();
 
     auto *settingsButton = makePillButton(
