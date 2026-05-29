@@ -6,6 +6,7 @@
 #include "capture/CaptureSession.h"
 #include "capture/DmaBufFrame.h"
 #include "capture/MonotonicClock.h"
+#include "platform/linux/MjpegPerfLog.h"
 #include "platform/linux/Nv12DmaBufGl.h"
 #include "platform/linux/P010DmaBufGl.h"
 #include "platform/linux/RgbDmaBufGl.h"
@@ -227,7 +228,7 @@ private:
 
 class FrameRenderer {
 public:
-    using FramePresentedHandler = std::function<void(qint64 latencyNs)>;
+    using FramePresentedHandler = std::function<void(qint64 lagNs, qint64 workNs)>;
 
     virtual ~FrameRenderer() = default;
     virtual QWidget *widget() = 0;
@@ -239,7 +240,7 @@ public:
     {
         framePresentedHandler_ = std::move(handler);
     }
-    virtual void setFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0) = 0;
+    virtual void setFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0, qint64 wakeAtNs = 0) = 0;
     virtual void setDmaFrame(capture::DmaBufFrameHandle frame)
     {
         Q_UNUSED(frame);
@@ -253,17 +254,27 @@ public:
     }
 
 protected:
-    void reportFramePresented()
+    void reportFramePresented(const qint64 endNs = 0)
     {
-        if (!framePresentedHandler_ || displayCapturedAtNs_ <= 0) {
+        if (!framePresentedHandler_) {
             return;
         }
-        framePresentedHandler_(capture::monotonicClockNs() - displayCapturedAtNs_);
+        const auto finishNs = endNs > 0 ? endNs : capture::monotonicClockNs();
+        const auto lagNs = displayCapturedAtNs_ > 0 ? finishNs - displayCapturedAtNs_ : qint64{0};
+        const auto workNs = displayWakeAtNs_ > 0 ? finishNs - displayWakeAtNs_ : qint64{0};
+        if (lagNs <= 0) {
+            displayCapturedAtNs_ = 0;
+            displayWakeAtNs_ = 0;
+            return;
+        }
+        framePresentedHandler_(lagNs, workNs);
         displayCapturedAtNs_ = 0;
+        displayWakeAtNs_ = 0;
     }
 
     FramePresentedHandler framePresentedHandler_;
     qint64 displayCapturedAtNs_ = 0;
+    qint64 displayWakeAtNs_ = 0;
 };
 
 class CpuFrameRenderer final : public QWidget, public FrameRenderer {
@@ -284,9 +295,10 @@ public:
         firstFramePaintedHandler_ = std::move(handler);
     }
 
-    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0, const qint64 wakeAtNs = 0) override
     {
         displayCapturedAtNs_ = capturedAtNs;
+        displayWakeAtNs_ = wakeAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
         refreshCpuScaleCache();
@@ -491,7 +503,7 @@ public:
         firstFramePaintedHandler_ = std::move(handler);
     }
 
-    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0) override
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0, const qint64 wakeAtNs = 0) override
     {
         dmaFrame_.reset();
         clearBoundDmaIdentity();
@@ -505,6 +517,7 @@ public:
         }
         activeGlRenderer_ = -1;
         displayCapturedAtNs_ = capturedAtNs;
+        displayWakeAtNs_ = wakeAtNs;
         frame_ = std::move(frame);
         updateTargetRect();
         refreshCpuScaleCache();
@@ -516,6 +529,7 @@ public:
     {
         frame_.reset();
         displayCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
+        displayWakeAtNs_ = frame ? frame->wakeAtNs : 0;
         dmaFrame_ = std::move(frame);
         updateTargetRect();
         // Synchronous present: collapse QueuedConnection delivery + paintGL into one UI-thread hop (lower lag than update()).
@@ -715,11 +729,17 @@ private:
     }
 
     // Return the V4L2 buffer to the driver as soon as the GPU has sampled it (see glFinish below).
-    void completeDmaPresent(const int bufferIndex)
+    void completeDmaPresent(const int bufferIndex, qint64 *glFinishNs = nullptr)
     {
         if (context() != nullptr) {
             if (auto *gl = context()->functions()) {
-                gl->glFinish();
+                if (glFinishNs != nullptr) {
+                    const auto startNs = capture::monotonicClockNs();
+                    gl->glFinish();
+                    *glFinishNs = capture::monotonicClockNs() - startNs;
+                } else {
+                    gl->glFinish();
+                }
             }
         }
         finishDmaBufReadIfActive();
@@ -783,7 +803,18 @@ private:
         const auto &frame = *dmaFrame_;
         const auto needsBind = !isBoundToDmaFrame(frame);
 
+        const auto traceEnabled = platform::linux::frame_trace::enabled();
+        const auto paintStartNs = traceEnabled ? capture::monotonicClockNs() : qint64{0};
+        const auto traceSeq = frame.seq;
+        const auto traceCapturedAtNs = frame.capturedAtNs;
+        const auto traceEmittedAtNs = frame.emittedAtNs;
+        const auto traceBufferIndex = frame.captureBufferIndex;
+        const char *traceOrigin =
+            frame.origin == capture::DmaBufOrigin::VaapiMjpeg ? "vaapi-mjpeg" : "v4l2";
+        qint64 bindNs = 0;
+
         if (needsBind) {
+            const auto bindStartNs = traceEnabled ? capture::monotonicClockNs() : qint64{0};
             if (!beginDmaBufReadForBind(frame, true)) {
                 return false;
             }
@@ -793,16 +824,40 @@ private:
                 return false;
             }
             setBoundDmaIdentity(frame);
+            if (traceEnabled) {
+                bindNs = capture::monotonicClockNs() - bindStartNs;
+            }
         }
 
         activeGlRenderer_ = rendererIndex;
+        const auto drawStartNs = traceEnabled ? capture::monotonicClockNs() : qint64{0};
         drawFn();
+        const auto drawNs = traceEnabled ? capture::monotonicClockNs() - drawStartNs : qint64{0};
         if (dmaPresentedHandler_) {
             dmaPresentedHandler_(frame.bytesUsed);
         }
-        reportFramePresented();
         notifyFirstFramePainted();
-        completeDmaPresent(frame.bufferIndex);
+        qint64 glFinishNs = 0;
+        completeDmaPresent(frame.bufferIndex, traceEnabled ? &glFinishNs : nullptr);
+        const auto presentedNs = capture::monotonicClockNs();
+        reportFramePresented(presentedNs);
+
+        if (traceEnabled) {
+            platform::linux::frame_trace::PresentSpan span;
+            span.seq = traceSeq;
+            span.capturedAtNs = traceCapturedAtNs;
+            span.captureBufferIndex = traceBufferIndex;
+            span.lagMs = capture::monotonicLagMs(traceCapturedAtNs, presentedNs);
+            span.origin = traceOrigin;
+            if (traceEmittedAtNs != 0) {
+                span.emitToPaintMs = static_cast<double>(paintStartNs - traceEmittedAtNs) / 1'000'000.0;
+            }
+            span.eglReused = !needsBind;
+            span.eglBindMs = static_cast<double>(bindNs) / 1'000'000.0;
+            span.drawMs = static_cast<double>(drawNs) / 1'000'000.0;
+            span.glFinishMs = static_cast<double>(glFinishNs) / 1'000'000.0;
+            platform::linux::frame_trace::recordPresent(span);
+        }
         return true;
     }
 
@@ -905,7 +960,8 @@ bool pixelFormatSupportsDmaDisplay(const QString &pixelFormat)
         upper == QStringLiteral("BGR3") || upper == QStringLiteral("BGR24") ||
         upper == QStringLiteral("YUYV") || upper == QStringLiteral("YUY2") ||
         upper == QStringLiteral("YU12") || upper == QStringLiteral("I420") ||
-        upper == QStringLiteral("YV12") || upper == QStringLiteral("YVU420");
+        upper == QStringLiteral("YV12") || upper == QStringLiteral("YVU420") || upper == QStringLiteral("MJPEG") ||
+        upper == QStringLiteral("MJPG") || upper == QStringLiteral("JPEG");
 }
 
 bool canCreateOpenGLContext()
@@ -931,13 +987,13 @@ bool canCreateOpenGLContext()
 
 class VideoSurface final : public QWidget {
 public:
-    explicit VideoSurface(QWidget *parent = nullptr)
+    explicit VideoSurface(const bool disableGpu, QWidget *parent = nullptr)
         : QWidget(parent)
     {
         setAutoFillBackground(false);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
-        if (canCreateOpenGLContext()) {
+        if (!disableGpu && canCreateOpenGLContext()) {
             auto *renderer = new GpuFrameRenderer(this);
             renderer_ = renderer;
             rendererWidget_ = renderer;
@@ -960,7 +1016,11 @@ public:
             auto *renderer = new CpuFrameRenderer(this);
             renderer_ = renderer;
             rendererWidget_ = renderer;
-            std::cout << "[MainWindow capture] video renderer: CPU fallback" << std::endl;
+            std::cout << "[MainWindow capture] video renderer: CPU fallback";
+            if (disableGpu) {
+                std::cout << " (GPU disabled)";
+            }
+            std::cout << std::endl;
         }
         std::cout.flush();
         rendererWidget_->lower();
@@ -976,9 +1036,9 @@ public:
 
     }
 
-    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
+    void setFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0, const qint64 wakeAtNs = 0)
     {
-        renderer_->setFrame(std::move(frame), capturedAtNs);
+        renderer_->setFrame(std::move(frame), capturedAtNs, wakeAtNs);
     }
 
     void setFramePresentedHandler(FrameRenderer::FramePresentedHandler handler)
@@ -1000,10 +1060,11 @@ public:
         }
     }
 
-    void setPendingFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0)
+    void setPendingFrame(capture::FrameHandle frame, const qint64 capturedAtNs = 0, const qint64 wakeAtNs = 0)
     {
         pendingDmaFrame_.reset();
         pendingCapturedAtNs_ = capturedAtNs;
+        pendingWakeAtNs_ = wakeAtNs;
         pendingFrame_ = std::move(frame);
         schedulePresent();
     }
@@ -1012,6 +1073,7 @@ public:
     {
         pendingFrame_.reset();
         pendingCapturedAtNs_ = frame ? frame->capturedAtNs : 0;
+        pendingWakeAtNs_ = frame ? frame->wakeAtNs : 0;
         pendingDmaFrame_ = std::move(frame);
         schedulePresent();
     }
@@ -1177,8 +1239,9 @@ private:
             return;
         }
 
-        setFrame(std::move(pendingFrame_), pendingCapturedAtNs_);
+        setFrame(std::move(pendingFrame_), pendingCapturedAtNs_, pendingWakeAtNs_);
         pendingCapturedAtNs_ = 0;
+        pendingWakeAtNs_ = 0;
         presentCpuCount_.fetch_add(1, std::memory_order_relaxed);
         uiFrameCount_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1247,6 +1310,7 @@ private:
     capture::FrameHandle pendingFrame_;
     capture::DmaBufFrameHandle pendingDmaFrame_;
     qint64 pendingCapturedAtNs_ = 0;
+    qint64 pendingWakeAtNs_ = 0;
     QPointer<QLabel> startupOverlay_;
     QPointer<QWidget> overlay_;
     QPointer<QWidget> controlsOverlay_;
@@ -2403,7 +2467,7 @@ void MainWindow::startPlayback()
         captureSession_.get(),
         &capture::CaptureSession::frameReady,
         this,
-        [this](capture::FrameHandle frame, const qint64 capturedAtNs) {
+        [this](capture::FrameHandle frame, const qint64 capturedAtNs, const qint64 wakeAtNs) {
             if (playbackStopping_.load(std::memory_order_acquire)) {
                 return;
             }
@@ -2414,7 +2478,7 @@ void MainWindow::startPlayback()
                 showPlaybackState(std::move(frame));
                 return;
             }
-            updateVideoFrame(std::move(frame), capturedAtNs);
+            updateVideoFrame(std::move(frame), capturedAtNs, wakeAtNs);
         });
     connect(captureSession_.get(), &capture::CaptureSession::dmaFrameReady, this, [this](capture::DmaBufFrameHandle frame) {
         if (playbackStopping_.load(std::memory_order_acquire)) {
@@ -2573,11 +2637,13 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    auto *video = new VideoSurface(root);
+    auto *video = new VideoSurface(disableGpu_, root);
     video->setStartupOverlayVisible(!firstFrame || firstFrame->isNull());
     videoSurface_ = video;
     dmaFallbackForcedCpu_ = false;
-    video->setFramePresentedHandler([this](const qint64 latencyNs) { recordPresentLatency(latencyNs); });
+    video->setFramePresentedHandler([this](const qint64 lagNs, const qint64 workNs) {
+        recordPresentMetrics(lagNs, workNs);
+    });
     video->setDmaCpuFallbackHandler([this](capture::DmaBufFrameHandle frame) {
         if (!captureSession_ || !captureThread_ || !captureThread_->isRunning() || !frame) {
             return;
@@ -2768,7 +2834,7 @@ void MainWindow::showPlaybackState(capture::FrameHandle firstFrame)
     resetPlaybackControlsTimer();
 }
 
-void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 capturedAtNs)
+void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 capturedAtNs, const qint64 wakeAtNs)
 {
     if (playbackStopping_.load(std::memory_order_acquire)) {
         return;
@@ -2777,7 +2843,7 @@ void MainWindow::updateVideoFrame(capture::FrameHandle frame, const qint64 captu
         return;
     }
 
-    videoSurface_->setPendingFrame(std::move(frame), capturedAtNs);
+    videoSurface_->setPendingFrame(std::move(frame), capturedAtNs, wakeAtNs);
 }
 
 void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
@@ -2792,9 +2858,10 @@ void MainWindow::updateVideoDmaFrame(capture::DmaBufFrameHandle frame)
     videoSurface_->setPendingDmaFrame(std::move(frame));
 }
 
-void MainWindow::recordPresentLatency(const qint64 latencyNs)
+void MainWindow::recordPresentMetrics(const qint64 lagNs, const qint64 workNs)
 {
-    if (latencyNs <= 0) {
+    // lagNs is (presentNs - capturedAtNs); workNs is (presentNs - wakeAtNs). Direct subtractions only.
+    if (lagNs <= 0) {
         return;
     }
 
@@ -2805,7 +2872,10 @@ void MainWindow::recordPresentLatency(const qint64 latencyNs)
     }
 
     ++presentLagSampleCount_;
-    presentLagTotalNs_ += latencyNs;
+    presentLagTotalNs_ += lagNs;
+    if (workNs > 0) {
+        presentWorkTotalNs_ += workNs;
+    }
 
     const auto elapsedNs = nowNs - presentLagWindowStartNs_;
     if (elapsedNs < windowNs) {
@@ -2815,10 +2885,14 @@ void MainWindow::recordPresentLatency(const qint64 latencyNs)
     presentLagAvgMs_ = presentLagSampleCount_ > 0
         ? static_cast<double>(presentLagTotalNs_) / static_cast<double>(presentLagSampleCount_) / 1'000'000.0
         : 0.0;
+    presentWorkAvgMs_ = presentLagSampleCount_ > 0
+        ? static_cast<double>(presentWorkTotalNs_) / static_cast<double>(presentLagSampleCount_) / 1'000'000.0
+        : 0.0;
     presentLagWindowStartNs_ = nowNs;
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
-    // Lag value is picked up by statsOverlayTimer_; do not format overlay strings from the video present path.
+    presentWorkTotalNs_ = 0;
+    // Lag/Work values are picked up by statsOverlayTimer_; do not format overlay strings from the video present path.
 }
 
 void MainWindow::updateStatsOverlay()
@@ -2925,12 +2999,16 @@ QString MainWindow::formatStatsOverlayText() const
     QStringList advanced {
         QStringLiteral("%1").arg(frameMemory),
         QStringLiteral("%1").arg(capture::displayPathLabel(displayPath_)),
+        QStringLiteral("Work:%1").arg(qRound(presentWorkAvgMs_)),
         QStringLiteral("UI:%1").arg(QString::number(uiFps_, 'f', 0)),
         QStringLiteral("Paint:%1").arg(QString::number(paintFps_, 'f', 0)),
         QStringLiteral("Cad:%1").arg(configuredFps > 0.0 ? QString::number(1000.0 / configuredFps, 'f', 1) : QStringLiteral("0.0")),
         QStringLiteral("Buf:%1").arg(latestTelemetry_.bufferCount),
         QStringLiteral("Payload:%1KiB").arg(QString::number(latestTelemetry_.payloadAvgKb, 'f', 0)),
     };
+    if (latestTelemetry_.mjpegHwDecodeActive) {
+        advanced += QStringLiteral("HWJD");
+    }
     fields += advanced;
     return fields.join(QStringLiteral(" | "));
 }
@@ -3110,9 +3188,11 @@ void MainWindow::stopPlayback()
         statsOverlayTimer_->stop();
     }
     presentLagAvgMs_ = 0.0;
+    presentWorkAvgMs_ = 0.0;
     presentLagWindowStartNs_ = 0;
     presentLagSampleCount_ = 0;
     presentLagTotalNs_ = 0;
+    presentWorkTotalNs_ = 0;
     statsOverlay_.clear();
     videoSurface_.clear();
     buildStoppedState();

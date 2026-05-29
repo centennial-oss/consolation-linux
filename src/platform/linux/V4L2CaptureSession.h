@@ -2,12 +2,16 @@
 
 #include "capture/CaptureSession.h"
 #include "capture/FrameBufferPool.h"
+#include "platform/linux/MjpegDecoder.h"
+#include "platform/linux/MjpegDecoderBackends.h"
 
 #include <QSocketNotifier>
 
 #include <linux/videodev2.h>
 
+#include <array>
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -39,13 +43,24 @@ private:
         size_t length = 0;
         int dmaFd = -1;
         qint64 capturedAtNs = 0;
+        qint64 presentationBaseNs = 0;
+        qint64 wakeAtNs = 0;
+        // Frame-trace bookkeeping (CONSOLATION_FRAME_TRACE): monotonic DQBUF time and the seq of the
+        // last frame handed out from this buffer, used to compute hold time at requeue.
+        qint64 dqMonotonicNs = 0;
+        quint64 traceSeq = 0;
     };
 
     void handleReadyRead();
     void drainRequeuePending();
     [[nodiscard]] capture::DmaBufFrameHandle makeDmaBufFrameHandle(const v4l2_buffer &buffer);
+    [[nodiscard]] capture::DmaBufFrameHandle makeVaapiMjpegDmaFrameHandle(
+        const v4l2_buffer &buffer,
+        const mjpeg_backend::VaapiDmaFrame &decoded);
     void requeueCaptureBuffer(int bufferIndex);
+    void noteRequeueRequested(int bufferIndex);
     [[nodiscard]] bool useDmaBufDisplayPath() const;
+    [[nodiscard]] bool useVaapiMjpegDmaPath() const;
     [[nodiscard]] static bool pixelFormatSupportsDmaBufDisplay(quint32 pixelFormat);
     [[nodiscard]] bool configureDevice(const capture::CaptureDevice &device, const capture::CaptureFormat &format);
     [[nodiscard]] bool allocateBuffers();
@@ -57,9 +72,9 @@ private:
     [[nodiscard]] capture::FrameHandle decodeI420(const uchar *data, int bytesUsed, bool yvu);
     [[nodiscard]] capture::FrameHandle decodeRgb24(const uchar *data, int bytesUsed, bool bgr, bool flipVertical);
     [[nodiscard]] capture::FrameHandle decodeMjpeg(const uchar *data, int bytesUsed);
-    [[nodiscard]] capture::FrameHandle decodeMjpegQtFallback(const uchar *data, int bytesUsed);
     [[nodiscard]] QImage *writableFramePixels(const capture::FrameHandle &frame);
     void recordDecodedFrame(int bytesUsed, qint64 decodeNs, bool dmaBufPath);
+    void releaseVaapiMjpegDmaResources(int vaapiSlotIndex, const std::array<int, 2> &planeFds);
     [[nodiscard]] bool frameReadyForDmaDisplay(int bytesUsed, __u32 bufferFlags) const;
     void cleanupBuffers();
     void closeDevice();
@@ -74,8 +89,10 @@ private:
     std::vector<Buffer> buffers_;
     std::shared_ptr<capture::FrameBufferPool> framePool_;
     std::shared_ptr<std::vector<capture::DmaBufFrame>> dmaFramePool_;
+    std::shared_ptr<std::vector<capture::DmaBufFrame>> vaapiMjpegDmaPool_;
     bool dmaBufExportSupported_ = false;
     bool dmaBufDisplayEnabled_ = false;
+    bool vaapiMjpegDmaEnabled_ = false;
     std::atomic<bool> dmaBufDisplayRequested_ { false };
     std::shared_ptr<std::atomic<uint64_t>> requeuePending_;
     qint64 telemetryWindowStartNs_ = 0;
@@ -84,9 +101,21 @@ private:
     qint64 telemetryPayloadTotalBytes_ = 0;
     int telemetryDmaFrameCount_ = 0;
     int telemetryCpuFrameCount_ = 0;
+    int telemetryMjpegHwFrameCount_ = 0;
+    capture::MjpegDecodePath telemetryLastMjpegPath_ = capture::MjpegDecodePath::None;
+    MjpegDecoder mjpegDecoder_;
     bool dmaBufHandleFailureLogged_ = false;
     bool dmaBufWarmupSkipLogged_ = false;
     QSocketNotifier *notifier_ = nullptr;
+
+    // Frame-trace buffer-lifetime counters (CONSOLATION_FRAME_TRACE). All cross capture/UI threads.
+    static constexpr std::size_t kTraceCaptureBufferSlots = 32;
+    static constexpr std::size_t kTraceVaapiSlots = 8;
+    std::atomic<int> outstandingCaptureBuffers_ { 0 };
+    std::atomic<int> outstandingVaapiSlots_ { 0 };
+    std::array<std::atomic<qint64>, kTraceCaptureBufferSlots> requeueRequestedNs_ {};
+    std::array<std::atomic<qint64>, kTraceVaapiSlots> vaapiSlotHandoutNs_ {};
+    std::array<std::atomic<quint64>, kTraceVaapiSlots> vaapiSlotSeq_ {};
 };
 
 } // namespace consolation::platform::linux

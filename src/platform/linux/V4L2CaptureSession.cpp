@@ -3,6 +3,7 @@
 #include "capture/FourCc.h"
 #include "capture/MonotonicClock.h"
 #include "platform/linux/DmaBufSync.h"
+#include "platform/linux/MjpegPerfLog.h"
 
 #include <QByteArray>
 #include <QPointer>
@@ -168,6 +169,9 @@ void V4L2CaptureSession::stop()
         framePool_.reset();
     }
     dmaFramePool_.reset();
+    vaapiMjpegDmaPool_.reset();
+    vaapiMjpegDmaEnabled_ = false;
+    mjpegDecoder_.reset();
     emit logMessage(QStringLiteral("V4L2 stop complete"));
 }
 
@@ -309,6 +313,27 @@ bool V4L2CaptureSession::configureDevice(const capture::CaptureDevice &device, c
     }
 
     framePool_ = std::make_shared<capture::FrameBufferPool>();
+    vaapiMjpegDmaPool_.reset();
+    vaapiMjpegDmaEnabled_ = false;
+    if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
+        mjpegDecoder_.configure(width_, height_);
+        const auto dmaDisplayRequested = dmaBufDisplayRequested_.load();
+        const auto decoderSupportsDma = mjpegDecoder_.supportsDmaDecode();
+        vaapiMjpegDmaEnabled_ = dmaDisplayRequested && decoderSupportsDma;
+        if (vaapiMjpegDmaEnabled_) {
+            constexpr std::size_t kVaapiMjpegDmaSlots = 8;
+            vaapiMjpegDmaPool_ = std::make_shared<std::vector<capture::DmaBufFrame>>(kVaapiMjpegDmaSlots);
+            emit logMessage(QStringLiteral("VA-API MJPEG DMA-BUF display enabled (zero-copy NV12)"));
+        } else {
+            emit logMessage(QStringLiteral(
+                "VA-API MJPEG DMA-BUF display disabled (dmaDisplayRequested=%1, decoderSupportsDmaExport=%2); "
+                "using hardware decode to ARGB CPU-upload path")
+                                .arg(dmaDisplayRequested ? QStringLiteral("yes") : QStringLiteral("no"))
+                                .arg(decoderSupportsDma ? QStringLiteral("yes") : QStringLiteral("no")));
+        }
+    } else {
+        mjpegDecoder_.reset();
+    }
     return true;
 }
 
@@ -394,6 +419,9 @@ bool V4L2CaptureSession::queueBuffers()
 
 void V4L2CaptureSession::handleReadyRead()
 {
+    const auto traceEnabled = frame_trace::enabled();
+    const qint64 wakeNs = capture::monotonicClockNs();
+
     // Return any buffers that were released by the UI thread since the last wakeup.
     drainRequeuePending();
 
@@ -403,6 +431,9 @@ void V4L2CaptureSession::handleReadyRead()
     v4l2_buffer pending {};
     pending.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     pending.memory = V4L2_MEMORY_MMAP;
+
+    int drainCount = 0;
+    qint64 newestDqNs = 0;
 
     while (true) {
         v4l2_buffer buffer {};
@@ -419,11 +450,19 @@ void V4L2CaptureSession::handleReadyRead()
         }
 
         if (buffer.index < buffers_.size()) {
+            const auto dqNs = capture::monotonicClockNs();
             const bool isMono = (buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
             buffers_[buffer.index].capturedAtNs = isMono
                 ? static_cast<qint64>(buffer.timestamp.tv_sec) * 1'000'000'000LL
                   + static_cast<qint64>(buffer.timestamp.tv_usec) * 1'000LL
-                : capture::monotonicClockNs();
+                : dqNs;
+            buffers_[buffer.index].presentationBaseNs = dqNs;
+            buffers_[buffer.index].dqMonotonicNs = dqNs;
+            buffers_[buffer.index].wakeAtNs = wakeNs;
+            if (traceEnabled) {
+                newestDqNs = dqNs;
+                ++drainCount;
+            }
         }
 
         if (havePending) {
@@ -450,10 +489,103 @@ void V4L2CaptureSession::handleReadyRead()
     }
 
     if (pending.index < buffers_.size()) {
+        if (useVaapiMjpegDmaPath()) {
+            const auto bytesUsed = static_cast<int>(pending.bytesused);
+            const auto capturedAtNs = buffers_[pending.index].capturedAtNs;
+            if (!mjpegDecoder_.dmaSlotsAvailable()) {
+                if (traceEnabled) {
+                    const auto emitNs = capture::monotonicClockNs();
+                    frame_trace::CaptureSpan span;
+                    span.seq = frame_trace::nextSeq();
+                    span.fourcc = pixelFormat_;
+                    span.captureBufferIndex = static_cast<int>(pending.index);
+                    span.capturedAtNs = capturedAtNs;
+                    span.captureAgeMs = static_cast<double>(wakeNs - capturedAtNs) / 1'000'000.0;
+                    span.dqAgeMs = static_cast<double>(newestDqNs - capturedAtNs) / 1'000'000.0;
+                    span.drainCount = drainCount;
+                    span.dqToEmitMs = static_cast<double>(emitNs - newestDqNs) / 1'000'000.0;
+                    span.bytesUsed = bytesUsed;
+                    span.path = "vaapi-mjpeg-dma-slot-starved";
+                    frame_trace::recordCapture(span);
+                }
+            } else {
+                const auto decodeStartNs = capture::monotonicClockNs();
+                mjpeg_backend::VaapiDmaFrame decoded {};
+                if (mjpegDecoder_.decodeDma(
+                        static_cast<const uchar *>(buffers_[pending.index].start),
+                        bytesUsed,
+                        decoded)) {
+                    const auto decodeNs = capture::monotonicClockNs() - decodeStartNs;
+                    if (auto dmaFrame = makeVaapiMjpegDmaFrameHandle(pending, decoded)) {
+                        telemetryLastMjpegPath_ = capture::MjpegDecodePath::Vaapi;
+                        mjpeg_perf::recordSessionDecode(
+                            static_cast<double>(decodeNs) / 1'000'000.0,
+                            true,
+                            "vaapi-dma-buf");
+                        if (traceEnabled) {
+                            const auto emitNs = capture::monotonicClockNs();
+                            dmaFrame->seq = decoded.seq;
+                            dmaFrame->emittedAtNs = emitNs;
+                            buffers_[pending.index].traceSeq = decoded.seq;
+                            outstandingCaptureBuffers_.fetch_add(1, std::memory_order_relaxed);
+                            frame_trace::CaptureSpan span;
+                            span.seq = decoded.seq;
+                            span.fourcc = pixelFormat_;
+                            span.captureBufferIndex = static_cast<int>(pending.index);
+                            span.capturedAtNs = capturedAtNs;
+                            span.captureAgeMs = static_cast<double>(wakeNs - capturedAtNs) / 1'000'000.0;
+                            span.dqAgeMs = static_cast<double>(newestDqNs - capturedAtNs) / 1'000'000.0;
+                            span.drainCount = drainCount;
+                            span.dqToEmitMs = static_cast<double>(emitNs - newestDqNs) / 1'000'000.0;
+                            span.bytesUsed = bytesUsed;
+                            span.path = "vaapi-mjpeg-dma";
+                            frame_trace::recordCapture(span);
+                        }
+                        emit dmaFrameReady(std::move(dmaFrame));
+                        return;
+                    }
+                    for (const auto fd : decoded.planeFds) {
+                        if (fd >= 0) {
+                            ::close(fd);
+                        }
+                    }
+                    mjpegDecoder_.releaseDmaSlot(decoded.slotIndex);
+                    vaapiMjpegDmaEnabled_ = false;
+                    emit logMessage(QStringLiteral(
+                        "VA-API MJPEG DMA-BUF handle creation failed; using hardware decode to ARGB CPU-upload path"));
+                } else {
+                    vaapiMjpegDmaEnabled_ = false;
+                    emit logMessage(QStringLiteral(
+                        "VA-API MJPEG DMA-BUF decode/export failed; using hardware decode to ARGB CPU-upload path"));
+                }
+            }
+        }
+
         if (useDmaBufDisplayPath()) {
             const auto bytesUsed = static_cast<int>(pending.bytesused);
             if (frameReadyForDmaDisplay(bytesUsed, pending.flags)) {
                 if (auto dmaFrame = makeDmaBufFrameHandle(pending)) {
+                    if (traceEnabled) {
+                        const auto seq = frame_trace::nextSeq();
+                        const auto emitNs = capture::monotonicClockNs();
+                const auto capturedAtNs = buffers_[pending.index].capturedAtNs;
+                        dmaFrame->seq = seq;
+                        dmaFrame->emittedAtNs = emitNs;
+                        buffers_[pending.index].traceSeq = seq;
+                        outstandingCaptureBuffers_.fetch_add(1, std::memory_order_relaxed);
+                        frame_trace::CaptureSpan span;
+                        span.seq = seq;
+                        span.fourcc = pixelFormat_;
+                        span.captureBufferIndex = static_cast<int>(pending.index);
+                        span.capturedAtNs = capturedAtNs;
+                        span.captureAgeMs = static_cast<double>(wakeNs - capturedAtNs) / 1'000'000.0;
+                        span.dqAgeMs = static_cast<double>(newestDqNs - capturedAtNs) / 1'000'000.0;
+                        span.drainCount = drainCount;
+                        span.dqToEmitMs = static_cast<double>(emitNs - newestDqNs) / 1'000'000.0;
+                        span.bytesUsed = bytesUsed;
+                        span.path = "v4l2-dma";
+                        frame_trace::recordCapture(span);
+                    }
                     emit dmaFrameReady(std::move(dmaFrame));
                     return;
                 }
@@ -477,7 +609,39 @@ void V4L2CaptureSession::handleReadyRead()
         const auto decodeNs = capture::monotonicClockNs() - decodeStartNs;
         if (frame && !frame->isNull()) {
             recordDecodedFrame(static_cast<int>(pending.bytesused), decodeNs, false);
-            emit frameReady(std::move(frame), capturedAtNs);
+            if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
+                const char *detail = mjpegDecoder_.hardwareDecodeActive() ? "vaapi-cpu-argb" : "software";
+                mjpeg_perf::recordSessionDecode(static_cast<double>(decodeNs) / 1'000'000.0, false, detail);
+            }
+            if (traceEnabled) {
+                const auto emitNs = capture::monotonicClockNs();
+                // "cpu" here means the non-zero-copy present path (decoded into an ARGB QImage
+                // uploaded by the renderer), not necessarily a software decode. For MJPEG, report
+                // the actual decode backend so the trace agrees with the HWJD overlay.
+                const char *tracePath = "cpu";
+                if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
+                    switch (telemetryLastMjpegPath_) {
+                    case capture::MjpegDecodePath::Vaapi:   tracePath = "mjpeg-vaapi-argb"; break;
+                    case capture::MjpegDecodePath::V4l2M2m: tracePath = "mjpeg-v4l2m2m-argb"; break;
+                    case capture::MjpegDecodePath::Libyuv:  tracePath = "mjpeg-libyuv"; break;
+                    case capture::MjpegDecodePath::Qt:      tracePath = "mjpeg-qt"; break;
+                    default:                                tracePath = "mjpeg-software"; break;
+                    }
+                }
+                frame_trace::CaptureSpan span;
+                span.seq = frame_trace::nextSeq();
+                span.fourcc = pixelFormat_;
+                span.captureBufferIndex = static_cast<int>(pending.index);
+                span.capturedAtNs = capturedAtNs;
+                span.captureAgeMs = static_cast<double>(wakeNs - capturedAtNs) / 1'000'000.0;
+                span.dqAgeMs = static_cast<double>(newestDqNs - capturedAtNs) / 1'000'000.0;
+                span.drainCount = drainCount;
+                span.dqToEmitMs = static_cast<double>(emitNs - newestDqNs) / 1'000'000.0;
+                span.bytesUsed = static_cast<int>(pending.bytesused);
+                span.path = tracePath;
+                frame_trace::recordCapture(span);
+            }
+            emit frameReady(std::move(frame), capturedAtNs, buffers_[pending.index].wakeAtNs);
         }
     }
 
@@ -543,49 +707,28 @@ QImage *V4L2CaptureSession::writableFramePixels(const capture::FrameHandle &fram
 
 capture::FrameHandle V4L2CaptureSession::decodeMjpeg(const uchar *data, const int bytesUsed)
 {
-#ifdef HAVE_JPEG
-    int jpegWidth = 0;
-    int jpegHeight = 0;
-    if (libyuv::MJPGSize(data, static_cast<size_t>(bytesUsed), &jpegWidth, &jpegHeight) == 0 && jpegWidth > 0 &&
-        jpegHeight > 0) {
-        auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
-        auto *image = writableFramePixels(frame);
-        if (image != nullptr) {
-            const auto result = libyuv::MJPGToARGB(
-                data,
-                static_cast<size_t>(bytesUsed),
-                image->bits(),
-                image->bytesPerLine(),
-                jpegWidth,
-                jpegHeight,
-                width_,
-                height_);
-            if (result == 0) {
-                return frame;
-            }
-        }
+    if (data == nullptr || bytesUsed <= 0 || framePool_ == nullptr || width_ <= 0 || height_ <= 0) {
+        return {};
     }
-#endif
-    return decodeMjpegQtFallback(data, bytesUsed);
-}
 
-capture::FrameHandle V4L2CaptureSession::decodeMjpegQtFallback(const uchar *data, const int bytesUsed)
-{
     auto frame = framePool_->acquireForDecode(width_, height_, QImage::Format_RGB32);
-    if (!frame) {
-        return {};
-    }
-    const QImage decoded =
-        QImage::fromData(data, bytesUsed).convertToFormat(QImage::Format_RGB32);
-    if (decoded.isNull() || decoded.size() != frame->size() || decoded.bytesPerLine() != frame->bytesPerLine()) {
-        return {};
-    }
     auto *image = writableFramePixels(frame);
     if (image == nullptr) {
         return {};
     }
-    std::memcpy(image->bits(), decoded.constBits(), static_cast<size_t>(decoded.sizeInBytes()));
-    return frame;
+
+    if (mjpegDecoder_.decode(
+            data,
+            bytesUsed,
+            width_,
+            height_,
+            image->bits(),
+            image->bytesPerLine())) {
+        telemetryLastMjpegPath_ = mjpegDecoder_.lastPath();
+        return frame;
+    }
+
+    return {};
 }
 
 capture::FrameHandle V4L2CaptureSession::decodeYuyv(const uchar *data, const int bytesUsed)
@@ -785,6 +928,11 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
         ++telemetryDmaFrameCount_;
     } else {
         ++telemetryCpuFrameCount_;
+        if (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) {
+            if (capture::mjpegDecodePathIsHardware(telemetryLastMjpegPath_)) {
+                ++telemetryMjpegHwFrameCount_;
+            }
+        }
     }
 
     const auto elapsedNs = nowNs - telemetryWindowStartNs_;
@@ -808,6 +956,10 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
     snapshot.dmaFramesInWindow = telemetryDmaFrameCount_;
     snapshot.cpuFramesInWindow = telemetryCpuFrameCount_;
     snapshot.dmaCapturePathEnabled = useDmaBufDisplayPath();
+    snapshot.mjpegDecodePath = telemetryLastMjpegPath_;
+    snapshot.mjpegHwDecodeActive =
+        telemetryMjpegHwFrameCount_ > 0 &&
+        (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG);
     if (telemetryDmaFrameCount_ > 0 && telemetryCpuFrameCount_ == 0) {
         snapshot.frameMemory = capture::VideoFrameMemory::DmaBuf;
     } else if (telemetryCpuFrameCount_ > 0 && telemetryDmaFrameCount_ == 0) {
@@ -823,6 +975,7 @@ void V4L2CaptureSession::recordDecodedFrame(const int bytesUsed, const qint64 de
     telemetryPayloadTotalBytes_ = 0;
     telemetryDmaFrameCount_ = 0;
     telemetryCpuFrameCount_ = 0;
+    telemetryMjpegHwFrameCount_ = 0;
 }
 
 void V4L2CaptureSession::setDmaBufDisplayRequested(const bool requested)
@@ -840,8 +993,129 @@ bool V4L2CaptureSession::pixelFormatSupportsDmaBufDisplay(const quint32 pixelFor
 
 bool V4L2CaptureSession::useDmaBufDisplayPath() const
 {
-    return dmaBufDisplayRequested_.load() && dmaBufDisplayEnabled_ && dmaBufExportSupported_ &&
-        pixelFormatSupportsDmaBufDisplay(pixelFormat_) && fd_ >= 0 && streaming_;
+    return !useVaapiMjpegDmaPath() && dmaBufDisplayRequested_.load() && dmaBufDisplayEnabled_ &&
+        dmaBufExportSupported_ && pixelFormatSupportsDmaBufDisplay(pixelFormat_) && fd_ >= 0 && streaming_;
+}
+
+bool V4L2CaptureSession::useVaapiMjpegDmaPath() const
+{
+    return vaapiMjpegDmaEnabled_ && dmaBufDisplayRequested_.load() && streaming_ && fd_ >= 0 &&
+        (pixelFormat_ == V4L2_PIX_FMT_MJPEG || pixelFormat_ == V4L2_PIX_FMT_JPEG) && vaapiMjpegDmaPool_ != nullptr;
+}
+
+void V4L2CaptureSession::releaseVaapiMjpegDmaResources(
+    const int vaapiSlotIndex,
+    const std::array<int, 2> &planeFds)
+{
+    if (frame_trace::enabled()) {
+        const auto releaseNs = capture::monotonicClockNs();
+        frame_trace::BufferLifetimeSpan span;
+        span.event = "va-slot-release";
+        span.vaSurfaceSlot = vaapiSlotIndex;
+        if (vaapiSlotIndex >= 0 && static_cast<std::size_t>(vaapiSlotIndex) < kTraceVaapiSlots) {
+            const auto slotIdx = static_cast<std::size_t>(vaapiSlotIndex);
+            span.seq = vaapiSlotSeq_[slotIdx].load(std::memory_order_relaxed);
+            const auto handoutNs = vaapiSlotHandoutNs_[slotIdx].load(std::memory_order_relaxed);
+            if (handoutNs != 0) {
+                span.vaSlotHoldMs = static_cast<double>(releaseNs - handoutNs) / 1'000'000.0;
+            }
+        }
+        span.outstandingVaSlots = outstandingVaapiSlots_.fetch_sub(1, std::memory_order_relaxed) - 1;
+        frame_trace::recordBufferLifetime(span);
+    }
+
+    for (const auto fd : planeFds) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+    mjpegDecoder_.releaseDmaSlot(vaapiSlotIndex);
+}
+
+void V4L2CaptureSession::noteRequeueRequested(const int bufferIndex)
+{
+    if (!frame_trace::enabled() || bufferIndex < 0 ||
+        static_cast<std::size_t>(bufferIndex) >= kTraceCaptureBufferSlots) {
+        return;
+    }
+    requeueRequestedNs_[static_cast<std::size_t>(bufferIndex)].store(
+        capture::monotonicClockNs(), std::memory_order_relaxed);
+}
+
+capture::DmaBufFrameHandle V4L2CaptureSession::makeVaapiMjpegDmaFrameHandle(
+    const v4l2_buffer &buffer,
+    const mjpeg_backend::VaapiDmaFrame &decoded)
+{
+    if (decoded.dmaFd < 0 || decoded.slotIndex < 0 || decoded.width <= 0 || decoded.height <= 0 ||
+        decoded.stride <= 0 || !vaapiMjpegDmaPool_ ||
+        decoded.slotIndex >= static_cast<int>(vaapiMjpegDmaPool_->size()) || buffer.index >= buffers_.size()) {
+        return {};
+    }
+
+    capture::DmaBufFrame &slot = (*vaapiMjpegDmaPool_)[static_cast<size_t>(decoded.slotIndex)];
+    slot.bufferIndex = decoded.slotIndex;
+    slot.captureBufferIndex = static_cast<int>(buffer.index);
+    slot.dmaFd = decoded.dmaFd;
+    slot.planeFds = decoded.planeFds;
+    slot.planeOffsets = decoded.planeOffsets;
+    slot.planeStrides = decoded.planeStrides;
+    slot.planeFourccs = decoded.planeFourccs;
+    slot.planeModifiers = decoded.planeModifiers;
+    slot.width = decoded.width;
+    slot.height = decoded.height;
+    slot.stride = decoded.stride;
+    slot.bytesUsed = static_cast<int>(buffer.bytesused);
+    slot.capturedAtNs = buffers_[buffer.index].capturedAtNs;
+    slot.wakeAtNs = buffers_[buffer.index].wakeAtNs;
+    slot.origin = capture::DmaBufOrigin::VaapiMjpeg;
+    slot.layout = capture::DmaBufLayout::Nv12;
+    slot.flipVertical = false;
+
+    if (frame_trace::enabled()) {
+        const auto slotIdx = static_cast<std::size_t>(decoded.slotIndex);
+        if (slotIdx < kTraceVaapiSlots) {
+            vaapiSlotHandoutNs_[slotIdx].store(capture::monotonicClockNs(), std::memory_order_relaxed);
+            vaapiSlotSeq_[slotIdx].store(decoded.seq, std::memory_order_relaxed);
+        }
+        outstandingVaapiSlots_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    auto pending = requeuePending_;
+    auto pool = vaapiMjpegDmaPool_;
+    const auto captureBufferIndex = static_cast<int>(buffer.index);
+    const auto vaapiSlotIndex = decoded.slotIndex;
+    const QPointer<V4L2CaptureSession> session(this);
+    return capture::DmaBufFrameHandle(
+        &slot,
+        [pending = std::move(pending),
+         pool = std::move(pool),
+         captureBufferIndex,
+         vaapiSlotIndex,
+         session,
+         planeFds = decoded.planeFds](capture::DmaBufFrame *) {
+            if (session) {
+                session->releaseVaapiMjpegDmaResources(vaapiSlotIndex, planeFds);
+                session->noteRequeueRequested(captureBufferIndex);
+            } else {
+                for (const auto fd : planeFds) {
+                    if (fd >= 0) {
+                        ::close(fd);
+                    }
+                }
+            }
+            const auto prev =
+                pending->fetch_or(uint64_t{1} << captureBufferIndex, std::memory_order_release);
+            if (prev == 0 && session) {
+                QMetaObject::invokeMethod(
+                    session.data(),
+                    [session]() {
+                        if (session) {
+                            session->drainRequeuePending();
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }
+        });
 }
 
 capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_buffer &buffer)
@@ -858,16 +1132,28 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     // Use the pre-allocated pool slot for this V4L2 buffer index — no heap allocation per frame.
     capture::DmaBufFrame &slot = (*dmaFramePool_)[buffer.index];
     slot.bufferIndex = static_cast<int>(buffer.index);
+    slot.captureBufferIndex = static_cast<int>(buffer.index);
+    slot.origin = capture::DmaBufOrigin::V4L2Capture;
     slot.dmaFd = captureBuffer.dmaFd;
+    slot.planeFds = { captureBuffer.dmaFd, -1 };
+    slot.planeOffsets = { 0, 0 };
+    slot.planeStrides = { 0, 0 };
+    slot.planeFourccs = { 0, 0 };
+    slot.planeModifiers = { capture::DmaBufFrame::invalidModifier, capture::DmaBufFrame::invalidModifier };
     slot.width = width_;
     slot.height = height_;
     slot.bytesUsed = static_cast<int>(buffer.bytesused);
     slot.capturedAtNs = captureBuffer.capturedAtNs;
+    slot.wakeAtNs = captureBuffer.wakeAtNs;
     slot.flipVertical = false;
 
     if (pixelFormat_ == V4L2_PIX_FMT_NV12) {
         slot.layout = capture::DmaBufLayout::Nv12;
         slot.stride = std::max(bytesPerLine_, width_);
+        slot.planeFds[1] = captureBuffer.dmaFd;
+        slot.planeOffsets[1] = slot.stride * height_;
+        slot.planeStrides[0] = slot.stride;
+        slot.planeStrides[1] = slot.stride;
     } else if (pixelFormat_ == V4L2_PIX_FMT_P010) {
         slot.layout = capture::DmaBufLayout::P010;
         slot.stride = std::max(bytesPerLine_, width_ * 2);
@@ -904,6 +1190,9 @@ capture::DmaBufFrameHandle V4L2CaptureSession::makeDmaBufFrameHandle(const v4l2_
     return capture::DmaBufFrameHandle(&slot,
         [pending = std::move(pending), pool = std::move(pool), bufferIndex, session](capture::DmaBufFrame *) {
             // No delete — slot is owned by the pool, not the handle.
+            if (session) {
+                session->noteRequeueRequested(bufferIndex);
+            }
             const auto prev = pending->fetch_or(uint64_t{1} << bufferIndex, std::memory_order_release);
             if (prev == 0 && session) {
                 // First bit in this batch — wake the capture thread so it calls drainRequeuePending().
@@ -928,9 +1217,11 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
                 .arg(capture::fourCcToString(pixelFormat_)));
     }
 
-    const auto bufferIndex = frame->bufferIndex;
+    const auto bufferIndex =
+        frame->captureBufferIndex >= 0 ? frame->captureBufferIndex : frame->bufferIndex;
     const auto bytesUsed = frame->bytesUsed;
     const auto capturedAtNs = frame->capturedAtNs;
+    const auto wakeAtNs = frame->wakeAtNs;
 
     if (!streaming_ || fd_ < 0 || bufferIndex < 0 || bufferIndex >= static_cast<int>(buffers_.size())) {
         frame.reset();
@@ -944,7 +1235,7 @@ void V4L2CaptureSession::finishDmaFrameAsCpu(capture::DmaBufFrameHandle frame)
 
     if (cpuFrame && !cpuFrame->isNull()) {
         recordDecodedFrame(bytesUsed, decodeNs, false);
-        emit frameReady(std::move(cpuFrame), capturedAtNs);
+        emit frameReady(std::move(cpuFrame), capturedAtNs, wakeAtNs);
     }
 }
 
@@ -974,6 +1265,9 @@ void V4L2CaptureSession::requeueCaptureBuffer(const int bufferIndex)
         return;
     }
 
+    const auto traceEnabled = frame_trace::enabled();
+    const auto requeueNs = traceEnabled ? capture::monotonicClockNs() : qint64{0};
+
     v4l2_buffer buffer {};
     buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buffer.memory = V4L2_MEMORY_MMAP;
@@ -984,6 +1278,27 @@ void V4L2CaptureSession::requeueCaptureBuffer(const int bufferIndex)
             QStringLiteral("V4L2 DMA-BUF requeue failed for buffer %1: %2")
                 .arg(bufferIndex)
                 .arg(QString::fromLocal8Bit(std::strerror(errno))));
+        return;
+    }
+
+    if (traceEnabled) {
+        const auto idx = static_cast<std::size_t>(bufferIndex);
+        frame_trace::BufferLifetimeSpan span;
+        span.seq = buffers_[idx].traceSeq;
+        span.event = "v4l2-requeue";
+        span.captureBufferIndex = bufferIndex;
+        if (buffers_[idx].dqMonotonicNs != 0) {
+            span.v4l2HoldMs = static_cast<double>(requeueNs - buffers_[idx].dqMonotonicNs) / 1'000'000.0;
+        }
+        if (idx < kTraceCaptureBufferSlots) {
+            const auto requestedNs = requeueRequestedNs_[idx].load(std::memory_order_relaxed);
+            if (requestedNs != 0) {
+                span.requeueDelayMs = static_cast<double>(requeueNs - requestedNs) / 1'000'000.0;
+            }
+        }
+        span.outstandingCaptureBuffers =
+            outstandingCaptureBuffers_.fetch_sub(1, std::memory_order_relaxed) - 1;
+        frame_trace::recordBufferLifetime(span);
     }
 }
 

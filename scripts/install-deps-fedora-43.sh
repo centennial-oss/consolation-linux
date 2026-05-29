@@ -27,6 +27,7 @@ packages=(
   cmake
   gcc-c++
   libjpeg-turbo-devel
+  libva-devel
   mesa-libEGL-devel
   mesa-libGL-devel
   ninja-build

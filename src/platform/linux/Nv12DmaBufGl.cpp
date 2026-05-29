@@ -24,6 +24,12 @@
 #ifndef EGL_DMA_BUF_PLANE0_PITCH_EXT
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
 #endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT 0x3443
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT 0x3444
+#endif
 
 #ifndef DRM_FORMAT_R8
 #define DRM_FORMAT_R8 static_cast<EGLint>(0x20203852)
@@ -202,25 +208,48 @@ void *createPlaneImage(
     const int height,
     const int stride,
     const int offset,
-    const EGLint fourcc)
+    const EGLint fourcc,
+    const uint64_t modifier)
 {
-    const EGLint attribs[] = {
-        EGL_WIDTH,
-        width,
-        EGL_HEIGHT,
-        height,
-        EGL_LINUX_DRM_FOURCC_EXT,
-        fourcc,
-        EGL_DMA_BUF_PLANE0_FD_EXT,
-        dmaFd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT,
-        offset,
-        EGL_DMA_BUF_PLANE0_PITCH_EXT,
-        stride,
-        EGL_NONE,
+    std::array<EGLint, 18> attribs {};
+    int index = 0;
+    const auto append = [&](const EGLint value) {
+        attribs[static_cast<size_t>(index++)] = value;
     };
 
-    return eglCreateImageKHRFn(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    append(EGL_WIDTH);
+    append(width);
+    append(EGL_HEIGHT);
+    append(height);
+    append(EGL_LINUX_DRM_FOURCC_EXT);
+    append(fourcc);
+    append(EGL_DMA_BUF_PLANE0_FD_EXT);
+    append(dmaFd);
+    append(EGL_DMA_BUF_PLANE0_OFFSET_EXT);
+    append(offset);
+    append(EGL_DMA_BUF_PLANE0_PITCH_EXT);
+    append(stride);
+    if (modifier != capture::DmaBufFrame::invalidModifier) {
+        append(EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT);
+        append(static_cast<EGLint>(modifier & 0xffffffffU));
+        append(EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT);
+        append(static_cast<EGLint>(modifier >> 32U));
+    }
+    append(EGL_NONE);
+
+    return eglCreateImageKHRFn(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs.data());
+}
+
+void *createPlaneImage(
+    const EGLDisplay display,
+    const int dmaFd,
+    const int width,
+    const int height,
+    const int stride,
+    const int offset,
+    const EGLint fourcc)
+{
+    return createPlaneImage(display, dmaFd, width, height, stride, offset, fourcc, capture::DmaBufFrame::invalidModifier);
 }
 
 bool bindEglImageToTexture(const unsigned int textureId, void *const eglImage)
@@ -451,39 +480,56 @@ void Nv12DmaBufGl::releaseAllSlots()
 bool Nv12DmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, const int bufferIndex)
 {
     auto &slot = slots_[static_cast<size_t>(bufferIndex)];
-    if (slot.dmaFd == frame->dmaFd && slot.yTextureId != 0 && slot.uvTextureId != 0) {
+    if (slot.planeFds == frame->planeFds &&
+        slot.planeOffsets == frame->planeOffsets &&
+        slot.planeStrides == frame->planeStrides &&
+        slot.planeFourccs == frame->planeFourccs &&
+        slot.planeModifiers == frame->planeModifiers &&
+        slot.yTextureId != 0 && slot.uvTextureId != 0) {
         return true;
     }
 
     releaseSlot(bufferIndex);
 
     const auto display = static_cast<EGLDisplay>(eglDisplay_);
-    const auto chromaOffset = static_cast<int>(static_cast<size_t>(frame->stride) * static_cast<size_t>(frame->height));
+    const auto yFd = frame->planeFds[0] >= 0 ? frame->planeFds[0] : frame->dmaFd;
+    const auto uvFd = frame->planeFds[1] >= 0 ? frame->planeFds[1] : yFd;
+    const auto yStride = frame->planeStrides[0] > 0 ? frame->planeStrides[0] : frame->stride;
+    const auto uvStride = frame->planeStrides[1] > 0 ? frame->planeStrides[1] : yStride;
+    const auto yOffset = frame->planeOffsets[0];
+    const auto uvOffset = frame->planeOffsets[1] != 0
+        ? frame->planeOffsets[1]
+        : static_cast<int>(static_cast<size_t>(yStride) * static_cast<size_t>(frame->height));
+    const auto yFourcc = frame->planeFourccs[0] != 0 ? static_cast<EGLint>(frame->planeFourccs[0]) : DRM_FORMAT_R8;
+    const auto uvFourcc = frame->planeFourccs[1] != 0 ? static_cast<EGLint>(frame->planeFourccs[1]) : DRM_FORMAT_RG88;
     const auto chromaWidth = std::max(1, (frame->width + 1) / 2);
     const auto chromaHeight = std::max(1, (frame->height + 1) / 2);
 
-    slot.eglImageY = createPlaneImage(display, frame->dmaFd, frame->width, frame->height, frame->stride, 0, DRM_FORMAT_R8);
+    slot.eglImageY = createPlaneImage(
+        display,
+        yFd,
+        frame->width,
+        frame->height,
+        yStride,
+        yOffset,
+        yFourcc,
+        frame->planeModifiers[0]);
     if (slot.eglImageY == EGL_NO_IMAGE_KHR) {
         return false;
     }
 
     slot.eglImageUv = createPlaneImage(
         display,
-        frame->dmaFd,
+        uvFd,
         chromaWidth,
         chromaHeight,
-        frame->stride,
-        chromaOffset,
-        DRM_FORMAT_RG88);
-    if (slot.eglImageUv == EGL_NO_IMAGE_KHR) {
-        slot.eglImageUv = createPlaneImage(
-            display,
-            frame->dmaFd,
-            chromaWidth,
-            chromaHeight,
-            frame->stride,
-            chromaOffset,
-            DRM_FORMAT_GR88);
+        uvStride,
+        uvOffset,
+        uvFourcc,
+        frame->planeModifiers[1]);
+    if (slot.eglImageUv == EGL_NO_IMAGE_KHR && frame->planeFourccs[1] == 0) {
+        slot.eglImageUv =
+            createPlaneImage(display, uvFd, chromaWidth, chromaHeight, uvStride, uvOffset, DRM_FORMAT_GR88);
     }
     if (slot.eglImageUv == EGL_NO_IMAGE_KHR) {
         releaseSlot(bufferIndex);
@@ -498,7 +544,11 @@ bool Nv12DmaBufGl::ensureSlotBound(const capture::DmaBufFrameHandle &frame, cons
         return false;
     }
 
-    slot.dmaFd = frame->dmaFd;
+    slot.planeFds = frame->planeFds;
+    slot.planeOffsets = frame->planeOffsets;
+    slot.planeStrides = frame->planeStrides;
+    slot.planeFourccs = frame->planeFourccs;
+    slot.planeModifiers = frame->planeModifiers;
     return true;
 }
 

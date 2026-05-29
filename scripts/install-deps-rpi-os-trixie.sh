@@ -31,7 +31,9 @@ packages=(
   libegl-dev
   libgl-dev
   libjpeg62-turbo-dev
+  libva-dev
   libpipewire-0.3-dev
+  v4l-utils
   libxkbcommon-dev
   ninja-build
   pkg-config

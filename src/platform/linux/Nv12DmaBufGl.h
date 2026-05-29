@@ -7,6 +7,7 @@
 #include <QSize>
 
 #include <array>
+#include <cstdint>
 
 namespace consolation::platform::linux {
 
@@ -37,7 +38,14 @@ public:
 
 private:
     struct SlotBinding {
-        int dmaFd = -1;
+        std::array<int, 2> planeFds { -1, -1 };
+        std::array<int, 2> planeOffsets { 0, 0 };
+        std::array<int, 2> planeStrides { 0, 0 };
+        std::array<uint32_t, 2> planeFourccs { 0, 0 };
+        std::array<uint64_t, 2> planeModifiers {
+            capture::DmaBufFrame::invalidModifier,
+            capture::DmaBufFrame::invalidModifier,
+        };
         void *eglImageY = nullptr;
         void *eglImageUv = nullptr;
         unsigned int yTextureId = 0;

@@ -16,6 +16,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets
 find_package(JPEG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+pkg_check_modules(LIBVA libva libva-drm IMPORTED_TARGET)
 
 qt_standard_project_setup()
 
@@ -54,6 +55,15 @@ add_library(consolation_core STATIC
     src/platform/linux/YuyvDmaBufGl.h
     src/platform/linux/I420DmaBufGl.cpp
     src/platform/linux/I420DmaBufGl.h
+    src/platform/linux/MjpegDecoder.cpp
+    src/platform/linux/MjpegDecoder.h
+    src/platform/linux/MjpegDecoderBackends.h
+    src/platform/linux/MjpegDecoderJpegParse.cpp
+    src/platform/linux/MjpegDecoderJpegParse.h
+    src/platform/linux/MjpegDecoderV4l2M2m.cpp
+    src/platform/linux/MjpegPerfLog.cpp
+    src/platform/linux/MjpegPerfLog.h
+    src/platform/linux/MjpegDecoderVaapi.cpp
     src/platform/linux/V4L2CaptureSession.cpp
     src/platform/linux/V4L2CaptureSession.h
     src/platform/linux/V4L2DeviceDiscovery.cpp
@@ -88,6 +98,11 @@ if(JPEG_FOUND)
     else()
         target_link_libraries(consolation_core PRIVATE ${JPEG_LIBRARIES})
     endif()
+endif()
+
+if(LIBVA_FOUND)
+    target_compile_definitions(consolation_core PRIVATE CONSOLATION_HAVE_LIBVA)
+    target_link_libraries(consolation_core PRIVATE PkgConfig::LIBVA)
 endif()
 
 if(UNIX AND NOT APPLE)

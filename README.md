@@ -59,8 +59,10 @@ Consolation has been tested by the developers on all supported OS distributions 
 - CMake 3.22 or newer
 - C++20 compiler
 - Qt 6.4 or newer development packages
+- libjpeg-turbo development headers (software MJPEG decode)
+- Optional: `libva` development packages for VA-API hardware MJPEG on Intel/AMD
 
-See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands.
+See [DEVELOPER.md](DEVELOPER.md) for distro-specific setup commands, optional hardware MJPEG dependencies, and runtime driver notes.
 
 #### Building
 

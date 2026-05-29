@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
             attachedSession,
             &consolation::capture::CaptureSession::frameReady,
             &app,
-            [&](const consolation::capture::FrameHandle &frame, qint64) {
+            [&](const consolation::capture::FrameHandle &frame, qint64, qint64) {
             if (!frame || frame->isNull()) {
                 return;
             }

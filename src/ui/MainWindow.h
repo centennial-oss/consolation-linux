@@ -47,9 +47,9 @@ private:
     void showConnectingState();
     void showStoppingState();
     void showPlaybackState(capture::FrameHandle firstFrame = {});
-    void updateVideoFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0);
+    void updateVideoFrame(capture::FrameHandle frame, qint64 capturedAtNs = 0, qint64 wakeAtNs = 0);
     void updateVideoDmaFrame(capture::DmaBufFrameHandle frame);
-    void recordPresentLatency(qint64 latencyNs);
+    void recordPresentMetrics(qint64 lagNs, qint64 workNs);
     void updateStatsOverlay();
     void refreshStatsOverlayCache();
     [[nodiscard]] QString formatStatsOverlayText() const;
@@ -90,9 +90,11 @@ private:
     double uiFps_ = 0.0;
     double paintFps_ = 0.0;
     double presentLagAvgMs_ = 0.0;
+    double presentWorkAvgMs_ = 0.0;
     qint64 presentLagWindowStartNs_ = 0;
     int presentLagSampleCount_ = 0;
     qint64 presentLagTotalNs_ = 0;
+    qint64 presentWorkTotalNs_ = 0;
     capture::VideoDisplayPath displayPath_ = capture::VideoDisplayPath::Unknown;
     StatsOverlayPosition statsOverlayPosition_ = StatsOverlayPosition::Off;
     bool lowFpsWarningsEnabled_ = true;

@@ -51,6 +51,14 @@ enum class VideoDisplayPath {
     Mixed,
 };
 
+enum class MjpegDecodePath {
+    None = 0,
+    Vaapi,
+    V4l2M2m,
+    Libyuv,
+    Qt,
+};
+
 struct VideoTelemetrySnapshot {
     int width = 0;
     int height = 0;
@@ -64,7 +72,30 @@ struct VideoTelemetrySnapshot {
     int dmaFramesInWindow = 0;
     int cpuFramesInWindow = 0;
     bool dmaCapturePathEnabled = false;
+    MjpegDecodePath mjpegDecodePath = MjpegDecodePath::None;
+    bool mjpegHwDecodeActive = false;
 };
+
+inline QString mjpegDecodePathLabel(const MjpegDecodePath path)
+{
+    switch (path) {
+    case MjpegDecodePath::Vaapi:
+        return QStringLiteral("VA-API");
+    case MjpegDecodePath::V4l2M2m:
+        return QStringLiteral("V4L2");
+    case MjpegDecodePath::Libyuv:
+        return QStringLiteral("CPU");
+    case MjpegDecodePath::Qt:
+        return QStringLiteral("Qt");
+    default:
+        return QStringLiteral("—");
+    }
+}
+
+inline bool mjpegDecodePathIsHardware(const MjpegDecodePath path)
+{
+    return path == MjpegDecodePath::Vaapi || path == MjpegDecodePath::V4l2M2m;
+}
 
 inline QString frameMemoryLabel(const VideoFrameMemory memory)
 {
