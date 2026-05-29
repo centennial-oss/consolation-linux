@@ -644,15 +644,46 @@ protected:
         clientWaitSyncFn_ = nullptr;
         deleteSyncFn_ = nullptr;
         fencesAvailable_ = false;
+        conservativeDmaPresent_ = detectConservativeDmaPresent();
         if (auto *ctx = context()) {
             fenceSyncFn_ = reinterpret_cast<GlFenceSyncFn>(ctx->getProcAddress("glFenceSync"));
             clientWaitSyncFn_ = reinterpret_cast<GlClientWaitSyncFn>(ctx->getProcAddress("glClientWaitSync"));
             deleteSyncFn_ = reinterpret_cast<GlDeleteSyncFn>(ctx->getProcAddress("glDeleteSync"));
         }
+        // Fences stay enabled even in conservative mode (they don't affect frame integrity); only
+        // persistent EGLImage reuse is disabled (see paintDmaLayout / detectConservativeDmaPresent).
         fencesAvailable_ = fenceSyncFn_ != nullptr && clientWaitSyncFn_ != nullptr && deleteSyncFn_ != nullptr;
         std::cout << "[MainWindow capture] GPU present fences "
-                  << (fencesAvailable_ ? "enabled" : "unavailable; using glFinish") << std::endl;
+                  << (fencesAvailable_ ? "enabled" : "unavailable; using glFinish")
+                  << (conservativeDmaPresent_ ? "; persistent EGL disabled (conservative for this GPU)" : "")
+                  << std::endl;
         std::cout.flush();
+    }
+
+    [[nodiscard]] bool detectConservativeDmaPresent()
+    {
+        if (qEnvironmentVariableIsSet("CONSOLATION_CONSERVATIVE_DMA")) {
+            return qEnvironmentVariable("CONSOLATION_CONSERVATIVE_DMA") == QLatin1String("1");
+        }
+        auto *gl = context() != nullptr ? context()->functions() : nullptr;
+        if (gl == nullptr) {
+            return false;
+        }
+        const auto glString = [&](const GLenum name) {
+            const auto *str = reinterpret_cast<const char *>(gl->glGetString(name));
+            return QString::fromLatin1(str != nullptr ? str : "").toLower();
+        };
+        const auto vendor = glString(GL_VENDOR);
+        const auto renderer = glString(GL_RENDERER);
+        const bool isV3d = vendor.contains(QLatin1String("broadcom")) ||
+            renderer.contains(QLatin1String("v3d")) || renderer.contains(QLatin1String("vc4"));
+        if (isV3d) {
+            std::cout << "[MainWindow capture] Detected " << renderer.toStdString()
+                      << " GPU; using conservative DMA present path (per-frame EGL re-import + glFinish)"
+                      << std::endl;
+            std::cout.flush();
+        }
+        return isV3d;
     }
 
     void paintGL() override
@@ -1020,8 +1051,9 @@ private:
         const auto needsBind = !isBoundToDmaFrame(frame);
         const auto frameBufferIndex = frame.bufferIndex;
         // are exported once per VA slot and the FD reused.
-        const bool framePersistent = frame.origin == capture::DmaBufOrigin::V4L2Capture ||
-            frame.origin == capture::DmaBufOrigin::VaapiMjpeg;
+        const bool framePersistent = !conservativeDmaPresent_ &&
+            (frame.origin == capture::DmaBufOrigin::V4L2Capture ||
+             frame.origin == capture::DmaBufOrigin::VaapiMjpeg);
         const bool slotWasLive = framePersistent && slotBindingLive(frameBufferIndex);
 
         const auto traceEnabled = platform::linux::frame_trace::enabled();
@@ -1164,6 +1196,8 @@ private:
     GlClientWaitSyncFn clientWaitSyncFn_ = nullptr;
     GlDeleteSyncFn deleteSyncFn_ = nullptr;
     bool fencesAvailable_ = false;
+    // currently true only for rpi / broadcom v3d
+    bool conservativeDmaPresent_ = false;
     std::deque<PendingGpuRelease> pendingReleases_;
     QTimer *fenceTimer_ = nullptr;
 
@@ -3902,5 +3936,3 @@ void MainWindow::showAboutDialog()
 }
 
 } // namespace consolation::ui
-
-#include "MainWindow.moc"

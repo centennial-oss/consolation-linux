@@ -16,7 +16,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets
 find_package(JPEG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(LIBVA libva libva-drm IMPORTED_TARGET)
+pkg_check_modules(LIBVA libva libva-drm libdrm IMPORTED_TARGET)
 
 qt_standard_project_setup()
 

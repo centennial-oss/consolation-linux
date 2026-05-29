@@ -22,6 +22,7 @@
 #include <va/va_dec_jpeg.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
+#include <xf86drm.h>
 
 #endif
 
@@ -300,6 +301,18 @@ int openVaapiRenderNode()
     return -1;
 }
 
+[[nodiscard]] bool drmDriverHasNoVaapi(const int fd)
+{
+    drmVersionPtr version = drmGetVersion(fd);
+    if (version == nullptr) {
+        return false; // unknown — let libva try
+    }
+    const QByteArray name = QByteArray(version->name, version->name_len > 0 ? static_cast<int>(version->name_len) : 0)
+                                .toLower();
+    drmFreeVersion(version);
+    return name.contains("v3d") || name.contains("vc4");
+}
+
 [[nodiscard]] double elapsedMs(const qint64 startNs)
 {
     return static_cast<double>(consolation::capture::monotonicClockNs() - startNs) / 1'000'000.0;
@@ -320,6 +333,7 @@ struct VaapiDecoder::Impl {
 
     int drmFd = -1;
     VADisplay display = nullptr;
+    bool vaInitialized = false;
     VAConfigID config = VA_INVALID_ID;
     VAContextID context = VA_INVALID_ID;
     std::vector<VASurfaceID> surfaces_;
@@ -396,14 +410,13 @@ struct VaapiDecoder::Impl {
     void releaseExportedSlots()
     {
         for (auto &slot : exportedSlots_) {
-            for (auto &fd : slot.planeFds) {
+            for (const auto fd : slot.planeFds) {
                 if (fd >= 0) {
                     ::close(fd);
-                    fd = -1;
                 }
             }
-            slot = {};
         }
+        exportedSlots_ = {};
     }
 
     void release()
@@ -414,7 +427,7 @@ struct VaapiDecoder::Impl {
 
         slotInUseMask_.store(0, std::memory_order_release);
 
-        if (display != nullptr) {
+        if (display != nullptr && vaInitialized) {
             if (!surfaces_.empty()) {
                 vaDestroySurfaces(display, surfaces_.data(), static_cast<int>(surfaces_.size()));
                 surfaces_.clear();
@@ -428,8 +441,12 @@ struct VaapiDecoder::Impl {
                 config = VA_INVALID_ID;
             }
             vaTerminate(display);
-            display = nullptr;
         }
+        display = nullptr;
+        vaInitialized = false;
+        surfaces_.clear();
+        config = VA_INVALID_ID;
+        context = VA_INVALID_ID;
         if (drmFd >= 0) {
             ::close(drmFd);
             drmFd = -1;
@@ -1218,6 +1235,11 @@ bool VaapiDecoder::initialize(const int maxWidth, const int maxHeight)
         return false;
     }
 
+    if (drmDriverHasNoVaapi(drmFd)) {
+        ::close(drmFd);
+        return false;
+    }
+
     auto *impl = new Impl();
     impl->drmFd = drmFd;
     impl->display = vaGetDisplayDRM(drmFd);
@@ -1234,6 +1256,7 @@ bool VaapiDecoder::initialize(const int maxWidth, const int maxHeight)
         delete impl;
         return false;
     }
+    impl->vaInitialized = true;
 
     VAConfigAttrib attrib {};
     attrib.type = VAConfigAttribRTFormat;
