@@ -41,10 +41,6 @@ Consolation has been tested by the developers on all supported OS distributions 
 - PERESAL USB 3.0 Video Capture Card with PD 100W - 👌 🚀
 - UGREEN Full HD 1080p Capture Card (model 40189) -  ⚠️ max 30p @ 1920x1080
 
-## TODO
-
-- Automate release builds via GitHub Workflow
-
 ## Requirements
 
 ### Running
