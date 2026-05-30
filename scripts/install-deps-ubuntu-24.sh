@@ -18,12 +18,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "This script must be run as root (e.g. sudo $0)" >&2
+    exit 1
+  fi
+  exec sudo "$0" "$@"
+fi
+
 if ! command -v apt >/dev/null 2>&1; then
   echo "apt is required but was not found on PATH." >&2
   exit 1
 fi
 
-sudo apt update
+apt update
 
 packages=(
   build-essential
@@ -45,4 +53,4 @@ if [[ "$with_packaging" == "true" ]]; then
   packages+=(dpkg-dev)
 fi
 
-sudo apt install -y "${packages[@]}"
+apt install -y "${packages[@]}"

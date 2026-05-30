@@ -18,6 +18,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "This script must be run as root (e.g. sudo $0)" >&2
+    exit 1
+  fi
+  exec sudo "$0" "$@"
+fi
+
 if ! command -v dnf >/dev/null 2>&1; then
   echo "dnf is required but was not found on PATH." >&2
   exit 1
@@ -40,4 +48,4 @@ if [[ "$with_packaging" == "true" ]]; then
   packages+=(rpm-build)
 fi
 
-sudo dnf install -y "${packages[@]}"
+dnf install -y "${packages[@]}"
