@@ -96,14 +96,14 @@ jobs:
           - id: rpi-bookworm-arm64
             runner: ubuntu-24.04-arm
             image: debian:bookworm
-            bootstrap: scripts/install-deps-rpi-bookworm.sh
+            bootstrap: scripts/install-deps-rpi-os-bookworm.sh
             target: package-rpi-bookworm-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
           - id: rpi-trixie-arm64
             runner: ubuntu-24.04-arm
             image: debian:trixie
-            bootstrap: scripts/install-deps-rpi-trixie.sh
+            bootstrap: scripts/install-deps-rpi-os-trixie.sh
             target: package-rpi-trixie-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
