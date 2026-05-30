@@ -18,7 +18,9 @@ The app is intentionally simple: watch the live video on your computer. No recor
 
 ## Screenshots
 
-Coming soon.
+<img src="assets/screenshots/ubuntu-start-screen.png" alt="Ubuntu Start Screen" width="270" /> <img src="assets/screenshots/ubuntu-macos.png" alt="Ubuntu with MacOS stream" width="270" /> <img src="assets/screenshots/rpi-consolation-01.png" alt="Raspberry Pi 5 streaming Nintendo Switch" width="270" />
+
+<img src="assets/screenshots/fedora-rpi.png" alt="Fedora streaming Raspberry Pi" width="270" /> <img src="assets/screenshots/fedora-switch-01.png" alt="Fedora streaming Nintendo Switch" width="270" /> <img src="assets/screenshots/fedora-switch-02.png" alt="Fedora streaming Nintendo Switch 2 " width="270" />
 
 
 ## Privacy
