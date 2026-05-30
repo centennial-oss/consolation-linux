@@ -63,13 +63,6 @@ jobs:
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           # Ubuntu amd64
-          - id: ubuntu-22-amd64
-            runner: ubuntu-24.04
-            image: ubuntu:22.04
-            bootstrap: scripts/install-deps-ubuntu-22.sh
-            target: package-ubuntu-22-amd64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
           - id: ubuntu-24-amd64
             runner: ubuntu-24.04
             image: ubuntu:24.04
@@ -85,13 +78,6 @@ jobs:
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           # Ubuntu arm64
-          - id: ubuntu-22-arm64
-            runner: ubuntu-22.04-arm
-            image: ubuntu:22.04
-            bootstrap: scripts/install-deps-ubuntu-22.sh
-            target: package-ubuntu-22-arm64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
           - id: ubuntu-24-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:24.04
@@ -142,7 +128,7 @@ jobs:
             bash -lc '
               set -euxo pipefail
               chmod +x "${{ matrix.bootstrap }}"
-              "${{ matrix.bootstrap }}"
+              "${{ matrix.bootstrap }}" --with-packaging
               make "${{ matrix.target }}"
             '
 
