@@ -8,7 +8,7 @@ Installers are available for the following platforms in the Releases:
  * Ubuntu 26, 24 (amd64 and arm64)
  * Raspberry Pi OS Trixie
 
-Consolation is also availble for Apple devices ([GitHub](https://github.com/centennial-oss/consolation-apple) | [App Store](https://apps.apple.com/us/app/consolation/id1563856788)), Android tablets ([GitHub](https://github.com/centennial-oss/consolation-android) | [Play Store](https://play.google.com/store/apps/details?id=org.centennialoss.consolation)) and Windows ([GitHub](https://github.com/centennial-oss/consolation-windows) | [Microsoft Store](https://apps.microsoft.com/detail/9N96T6XGBFTF?hl=en-us&gl=US)).
+Consolation is also available for Apple devices ([GitHub](https://github.com/centennial-oss/consolation-apple) | [App Store](https://apps.apple.com/us/app/consolation/id1563856788)), Android tablets ([GitHub](https://github.com/centennial-oss/consolation-android) | [Play Store](https://play.google.com/store/apps/details?id=org.centennialoss.consolation)) and Windows ([GitHub](https://github.com/centennial-oss/consolation-windows) | [Microsoft Store](https://apps.microsoft.com/detail/9N96T6XGBFTF?hl=en-us&gl=US)).
 
 ## About
 
