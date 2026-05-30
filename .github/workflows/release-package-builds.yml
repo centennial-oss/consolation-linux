@@ -93,18 +93,11 @@ jobs:
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           # Raspberry Pi OS (Debian-compatible)
-          - id: rpi-bookworm-arm64
-            runner: ubuntu-24.04-arm
-            image: debian:bookworm
-            bootstrap: scripts/install-deps-rpi-os-bookworm.sh
-            target: package-rpi-bookworm-arm64
-            artifact_glob: "dist/**/*.{deb,tar.gz}"
-
           - id: rpi-trixie-arm64
             runner: ubuntu-24.04-arm
             image: debian:trixie
             bootstrap: scripts/install-deps-rpi-os-trixie.sh
-            target: package-rpi-trixie-arm64
+            target: package-rpi-os-trixie-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
     steps:
@@ -134,6 +127,11 @@ jobs:
               chmod +x "${{ matrix.bootstrap }}"
               "${{ matrix.bootstrap }}" --with-packaging
               make "${{ matrix.target }}"
+              mkdir -p dist
+              find . -maxdepth 2 -type f \
+                \( -name "*.rpm" -o -name "*.deb" -o -name "*.tar.gz" -o -name "*.AppImage" \) \
+                -path "./build-*/*" \
+                -exec cp -t dist/ {} +
             '
 
       - name: Stage artifacts
