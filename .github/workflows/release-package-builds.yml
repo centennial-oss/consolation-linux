@@ -1,12 +1,10 @@
 name: Release Linux Package Builds
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag, e.g. v1.0.0"
-        required: true
-        type: string
+  push:
+    tags:
+      # Semantic version tags: v1.0.0, v2.1.3, etc.
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -25,21 +23,21 @@ jobs:
             runner: ubuntu-24.04
             image: fedora:42
             bootstrap: scripts/bootstrap-fedora-42.sh
-            target: build-fedora-42-amd64
+            target: package-fedora-42-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-43-amd64
             runner: ubuntu-24.04
             image: fedora:43
             bootstrap: scripts/bootstrap-fedora-43.sh
-            target: build-fedora-43-amd64
+            target: package-fedora-43-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-44-amd64
             runner: ubuntu-24.04
             image: fedora:44
             bootstrap: scripts/bootstrap-fedora-44.sh
-            target: build-fedora-44-amd64
+            target: package-fedora-44-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           # Fedora arm64
@@ -47,21 +45,21 @@ jobs:
             runner: ubuntu-24.04-arm
             image: fedora:42
             bootstrap: scripts/bootstrap-fedora-42.sh
-            target: build-fedora-42-arm64
+            target: package-fedora-42-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-43-arm64
             runner: ubuntu-24.04-arm
             image: fedora:43
             bootstrap: scripts/bootstrap-fedora-43.sh
-            target: build-fedora-43-arm64
+            target: package-fedora-43-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-44-arm64
             runner: ubuntu-24.04-arm
             image: fedora:44
             bootstrap: scripts/bootstrap-fedora-44.sh
-            target: build-fedora-44-arm64
+            target: package-fedora-44-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           # Ubuntu amd64
@@ -69,21 +67,21 @@ jobs:
             runner: ubuntu-24.04
             image: ubuntu:22.04
             bootstrap: scripts/bootstrap-ubuntu-22.sh
-            target: build-ubuntu-22-amd64
+            target: package-ubuntu-22-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-24-amd64
             runner: ubuntu-24.04
             image: ubuntu:24.04
             bootstrap: scripts/bootstrap-ubuntu-24.sh
-            target: build-ubuntu-24-amd64
+            target: package-ubuntu-24-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-26-amd64
             runner: ubuntu-24.04
             image: ubuntu:26.04
             bootstrap: scripts/bootstrap-ubuntu-26.sh
-            target: build-ubuntu-26-amd64
+            target: package-ubuntu-26-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           # Ubuntu arm64
@@ -91,21 +89,21 @@ jobs:
             runner: ubuntu-22.04-arm
             image: ubuntu:22.04
             bootstrap: scripts/bootstrap-ubuntu-22.sh
-            target: build-ubuntu-22-arm64
+            target: package-ubuntu-22-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-24-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:24.04
             bootstrap: scripts/bootstrap-ubuntu-24.sh
-            target: build-ubuntu-24-arm64
+            target: package-ubuntu-24-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-26-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:26.04
             bootstrap: scripts/bootstrap-ubuntu-26.sh
-            target: build-ubuntu-26-arm64
+            target: package-ubuntu-26-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           # Raspberry Pi OS (Debian-compatible)
@@ -113,14 +111,14 @@ jobs:
             runner: ubuntu-24.04-arm
             image: debian:bookworm
             bootstrap: scripts/bootstrap-rpi-bookworm.sh
-            target: build-rpi-bookworm-arm64
+            target: package-rpi-bookworm-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
           - id: rpi-trixie-arm64
             runner: ubuntu-24.04-arm
             image: debian:trixie
             bootstrap: scripts/bootstrap-rpi-trixie.sh
-            target: build-rpi-trixie-arm64
+            target: package-rpi-trixie-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
     steps:
