@@ -12,8 +12,12 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <iostream>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <vector>
 
@@ -22,7 +26,6 @@
 #include <va/va_dec_jpeg.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
-#include <xf86drm.h>
 
 #endif
 
@@ -301,15 +304,28 @@ int openVaapiRenderNode()
     return -1;
 }
 
+[[nodiscard]] QByteArray drmDriverName(const int fd)
+{
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+        return {};
+    }
+    char linkPath[64];
+    std::snprintf(linkPath, sizeof(linkPath), "/sys/dev/char/%u:%u/device/driver",
+                  major(st.st_rdev), minor(st.st_rdev));
+    char target[256];
+    const auto len = ::readlink(linkPath, target, sizeof(target) - 1);
+    if (len <= 0) {
+        return {};
+    }
+    target[len] = '\0';
+    const char *slash = std::strrchr(target, '/');
+    return QByteArray(slash != nullptr ? slash + 1 : target);
+}
+
 [[nodiscard]] bool drmDriverHasNoVaapi(const int fd)
 {
-    drmVersionPtr version = drmGetVersion(fd);
-    if (version == nullptr) {
-        return false; // unknown — let libva try
-    }
-    const QByteArray name = QByteArray(version->name, version->name_len > 0 ? static_cast<int>(version->name_len) : 0)
-                                .toLower();
-    drmFreeVersion(version);
+    const QByteArray name = drmDriverName(fd).toLower();
     return name.contains("v3d") || name.contains("vc4");
 }
 
@@ -421,27 +437,26 @@ struct VaapiDecoder::Impl {
 
     void release()
     {
-        releaseExportImage();
         releaseExportedSlots();
-        releaseVaTableBuffers();
-
         slotInUseMask_.store(0, std::memory_order_release);
 
         if (display != nullptr && vaInitialized) {
+            releaseExportImage();
+            releaseVaTableBuffers();
             if (!surfaces_.empty()) {
                 vaDestroySurfaces(display, surfaces_.data(), static_cast<int>(surfaces_.size()));
-                surfaces_.clear();
             }
             if (context != VA_INVALID_ID) {
                 vaDestroyContext(display, context);
-                context = VA_INVALID_ID;
             }
             if (config != VA_INVALID_ID) {
                 vaDestroyConfig(display, config);
-                config = VA_INVALID_ID;
             }
             vaTerminate(display);
         }
+        exportImage_ = {};
+        exportImageWidth_ = 0;
+        exportImageHeight_ = 0;
         display = nullptr;
         vaInitialized = false;
         surfaces_.clear();
@@ -833,8 +848,11 @@ struct VaapiDecoder::Impl {
             &descriptor);
         if (status == VA_STATUS_SUCCESS) {
             closePrimeDescriptor(descriptor);
+            return true;
         }
-        return status == VA_STATUS_SUCCESS;
+        std::cerr << "[mjpeg-vaapi] DRM_PRIME_2 surface export probe failed: " << vaErrorStr(status)
+                  << " (status 0x" << std::hex << status << std::dec << ")" << std::endl;
+        return false;
     }
 
     [[nodiscard]] bool exportSurfaceDma(
@@ -1277,6 +1295,11 @@ bool VaapiDecoder::initialize(const int maxWidth, const int maxHeight)
     }
 
     impl->dmaExportSupported_ = impl->probeSurfaceDmaExport(impl->surfaceAt(0));
+
+    const char *vendor = vaQueryVendorString(impl->display);
+    std::cerr << "[mjpeg-vaapi] VA driver: \"" << (vendor != nullptr ? vendor : "unknown")
+              << "\"; zero-copy DMA export " << (impl->dmaExportSupported_ ? "supported" : "NOT supported")
+              << std::endl;
 
     impl_ = impl;
     return true;

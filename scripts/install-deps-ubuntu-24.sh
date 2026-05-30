@@ -36,6 +36,7 @@ apt update
 packages=(
   build-essential
   cmake
+  va-driver-all
   libegl-dev
   libgl-dev
   libjpeg-turbo8-dev

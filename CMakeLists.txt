@@ -16,7 +16,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Core DBus Gui OpenGLWidgets Svg Widgets
 find_package(JPEG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(LIBVA libva libva-drm libdrm IMPORTED_TARGET)
+pkg_check_modules(LIBVA libva libva-drm IMPORTED_TARGET)
 
 qt_standard_project_setup()
 
@@ -207,6 +207,10 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
     "libpipewire-0.3-0, libqt6core6t64 | libqt6core6, libqt6dbus6t64 | libqt6dbus6, libqt6gui6t64 | libqt6gui6, libqt6openglwidgets6, libqt6svg6, libqt6widgets6t64 | libqt6widgets6, qt6-qpa-plugins, qt6-wayland"
 )
+if(LIBVA_FOUND)
+    string(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS ", libva2, libva-drm2")
+    set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "va-driver-all")
+endif()
 
 set(CPACK_RPM_PACKAGE_LICENSE "Apache-2.0")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
