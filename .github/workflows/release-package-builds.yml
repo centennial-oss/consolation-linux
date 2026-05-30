@@ -22,21 +22,21 @@ jobs:
           - id: fedora-42-amd64
             runner: ubuntu-24.04
             image: fedora:42
-            bootstrap: scripts/bootstrap-fedora-42.sh
+            bootstrap: scripts/install-deps-fedora-42.sh
             target: package-fedora-42-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-43-amd64
             runner: ubuntu-24.04
             image: fedora:43
-            bootstrap: scripts/bootstrap-fedora-43.sh
+            bootstrap: scripts/install-deps-fedora-43.sh
             target: package-fedora-43-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-44-amd64
             runner: ubuntu-24.04
             image: fedora:44
-            bootstrap: scripts/bootstrap-fedora-44.sh
+            bootstrap: scripts/install-deps-fedora-44.sh
             target: package-fedora-44-amd64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
@@ -44,21 +44,21 @@ jobs:
           - id: fedora-42-arm64
             runner: ubuntu-24.04-arm
             image: fedora:42
-            bootstrap: scripts/bootstrap-fedora-42.sh
+            bootstrap: scripts/install-deps-fedora-42.sh
             target: package-fedora-42-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-43-arm64
             runner: ubuntu-24.04-arm
             image: fedora:43
-            bootstrap: scripts/bootstrap-fedora-43.sh
+            bootstrap: scripts/install-deps-fedora-43.sh
             target: package-fedora-43-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
           - id: fedora-44-arm64
             runner: ubuntu-24.04-arm
             image: fedora:44
-            bootstrap: scripts/bootstrap-fedora-44.sh
+            bootstrap: scripts/install-deps-fedora-44.sh
             target: package-fedora-44-arm64
             artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
 
@@ -66,21 +66,21 @@ jobs:
           - id: ubuntu-22-amd64
             runner: ubuntu-24.04
             image: ubuntu:22.04
-            bootstrap: scripts/bootstrap-ubuntu-22.sh
+            bootstrap: scripts/install-deps-ubuntu-22.sh
             target: package-ubuntu-22-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-24-amd64
             runner: ubuntu-24.04
             image: ubuntu:24.04
-            bootstrap: scripts/bootstrap-ubuntu-24.sh
+            bootstrap: scripts/install-deps-ubuntu-24.sh
             target: package-ubuntu-24-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-26-amd64
             runner: ubuntu-24.04
             image: ubuntu:26.04
-            bootstrap: scripts/bootstrap-ubuntu-26.sh
+            bootstrap: scripts/install-deps-ubuntu-26.sh
             target: package-ubuntu-26-amd64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
@@ -88,21 +88,21 @@ jobs:
           - id: ubuntu-22-arm64
             runner: ubuntu-22.04-arm
             image: ubuntu:22.04
-            bootstrap: scripts/bootstrap-ubuntu-22.sh
+            bootstrap: scripts/install-deps-ubuntu-22.sh
             target: package-ubuntu-22-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-24-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:24.04
-            bootstrap: scripts/bootstrap-ubuntu-24.sh
+            bootstrap: scripts/install-deps-ubuntu-24.sh
             target: package-ubuntu-24-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
           - id: ubuntu-26-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:26.04
-            bootstrap: scripts/bootstrap-ubuntu-26.sh
+            bootstrap: scripts/install-deps-ubuntu-26.sh
             target: package-ubuntu-26-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
 
@@ -110,14 +110,14 @@ jobs:
           - id: rpi-bookworm-arm64
             runner: ubuntu-24.04-arm
             image: debian:bookworm
-            bootstrap: scripts/bootstrap-rpi-bookworm.sh
+            bootstrap: scripts/install-deps-rpi-bookworm.sh
             target: package-rpi-bookworm-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
           - id: rpi-trixie-arm64
             runner: ubuntu-24.04-arm
             image: debian:trixie
-            bootstrap: scripts/bootstrap-rpi-trixie.sh
+            bootstrap: scripts/install-deps-rpi-trixie.sh
             target: package-rpi-trixie-arm64
             artifact_glob: "dist/**/*.{deb,tar.gz}"
 
