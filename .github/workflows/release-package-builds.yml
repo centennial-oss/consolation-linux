@@ -113,6 +113,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set release version
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
       - name: Build inside distro container
         shell: bash
         run: |
@@ -124,6 +127,7 @@ jobs:
             --volume "$PWD:/work" \
             --workdir /work \
             --env CI=1 \
+            --env RELEASE_VERSION="${RELEASE_VERSION}" \
             "${{ matrix.image }}" \
             bash -lc '
               set -euxo pipefail
