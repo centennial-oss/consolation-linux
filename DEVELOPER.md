@@ -10,7 +10,6 @@ Use these helper scripts to install distro-specific **build** dependencies from 
 scripts/install-deps-fedora-42.sh
 scripts/install-deps-fedora-43.sh
 scripts/install-deps-fedora-44.sh
-scripts/install-deps-ubuntu-22.sh
 scripts/install-deps-ubuntu-24.sh
 scripts/install-deps-ubuntu-26.sh
 scripts/install-deps-rpi-os-trixie.sh

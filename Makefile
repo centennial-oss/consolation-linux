@@ -30,11 +30,8 @@ SET_BUILD_INFO_SCRIPT := scripts/set-build-info.sh
 	package-fedora-43-arm64 \
 	package-fedora-44-amd64 \
 	package-fedora-44-arm64 \
-	build-ubuntu-22-binary \
 	build-ubuntu-24-binary \
 	build-ubuntu-26-binary \
-	package-ubuntu-22-amd64 \
-	package-ubuntu-22-arm64 \
 	package-ubuntu-24-amd64 \
 	package-ubuntu-24-arm64 \
 	package-ubuntu-26-amd64 \
@@ -137,10 +134,6 @@ package-fedora-44-arm64:
 
 ### binaries
 
-build-ubuntu-22-binary:
-	cmake --preset ubuntu-22
-	cmake --build --preset ubuntu-22
-
 build-ubuntu-24-binary:
 	cmake --preset ubuntu-24
 	cmake --build --preset ubuntu-24
@@ -150,18 +143,6 @@ build-ubuntu-26-binary:
 	cmake --build --preset ubuntu-26
 
 ### packages
-
-package-ubuntu-22-amd64:
-	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
-	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=amd64; \
-	$(MAKE) build-ubuntu-22-binary; \
-	cd build-ubuntu-22 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-jammy-amd64
-
-package-ubuntu-22-arm64:
-	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \
-	$(MAKE) set-release-version-info BUILD_ARCHITECTURE=arm64; \
-	$(MAKE) build-ubuntu-22-binary; \
-	cd build-ubuntu-22 && cpack -G DEB -D CPACK_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_VERSION=$(RELEASE_VERSION) -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -D CPACK_PACKAGE_FILE_NAME=consolation-$(RELEASE_VERSION)-ubuntu-jammy-arm64
 
 package-ubuntu-24-amd64:
 	@trap '$(MAKE) -C "$(CURDIR)" clear-version-info' EXIT; \

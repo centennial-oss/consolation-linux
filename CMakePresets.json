@@ -20,15 +20,6 @@
       }
     },
     {
-      "name": "ubuntu-22",
-      "displayName": "Ubuntu 22.04 (jammy)",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-ubuntu-22",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
-      }
-    },
-    {
       "name": "fedora-42",
       "displayName": "Fedora 42",
       "generator": "Ninja",
@@ -75,10 +66,6 @@
       "configurePreset": "ubuntu-24"
     },
     {
-      "name": "ubuntu-22",
-      "configurePreset": "ubuntu-22"
-    },
-    {
       "name": "fedora-42",
       "configurePreset": "fedora-42"
     },
@@ -106,13 +93,6 @@
     {
       "name": "ubuntu-24",
       "configurePreset": "ubuntu-24",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "ubuntu-22",
-      "configurePreset": "ubuntu-22",
       "output": {
         "outputOnFailure": true
       }
