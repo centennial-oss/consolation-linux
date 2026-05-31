@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set release version
         if: inputs.mode == 'package'
