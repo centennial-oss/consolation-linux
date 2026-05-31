@@ -1,0 +1,112 @@
+[
+  {
+    "id": "fedora-42-amd64",
+    "runner": "ubuntu-24.04",
+    "image": "fedora:42",
+    "bootstrap": "scripts/install-deps-fedora-42.sh",
+    "binary_target": "build-fedora-42-binary",
+    "package_target": "package-fedora-42-amd64",
+    "test_preset": "fedora-42",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "fedora-43-amd64",
+    "runner": "ubuntu-24.04",
+    "image": "fedora:43",
+    "bootstrap": "scripts/install-deps-fedora-43.sh",
+    "binary_target": "build-fedora-43-binary",
+    "package_target": "package-fedora-43-amd64",
+    "test_preset": "fedora-43",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "fedora-44-amd64",
+    "runner": "ubuntu-24.04",
+    "image": "fedora:44",
+    "bootstrap": "scripts/install-deps-fedora-44.sh",
+    "binary_target": "build-fedora-44-binary",
+    "package_target": "package-fedora-44-amd64",
+    "test_preset": "fedora-44",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "fedora-42-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "fedora:42",
+    "bootstrap": "scripts/install-deps-fedora-42.sh",
+    "binary_target": "build-fedora-42-binary",
+    "package_target": "package-fedora-42-arm64",
+    "test_preset": "fedora-42",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "fedora-43-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "fedora:43",
+    "bootstrap": "scripts/install-deps-fedora-43.sh",
+    "binary_target": "build-fedora-43-binary",
+    "package_target": "package-fedora-43-arm64",
+    "test_preset": "fedora-43",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "fedora-44-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "fedora:44",
+    "bootstrap": "scripts/install-deps-fedora-44.sh",
+    "binary_target": "build-fedora-44-binary",
+    "package_target": "package-fedora-44-arm64",
+    "test_preset": "fedora-44",
+    "package_artifact_glob": "dist/**/*.rpm"
+  },
+  {
+    "id": "ubuntu-24-amd64",
+    "runner": "ubuntu-24.04",
+    "image": "ubuntu:24.04",
+    "bootstrap": "scripts/install-deps-ubuntu-24.sh",
+    "binary_target": "build-ubuntu-24-binary",
+    "package_target": "package-ubuntu-24-amd64",
+    "test_preset": "ubuntu-24",
+    "package_artifact_glob": "dist/**/*.deb"
+  },
+  {
+    "id": "ubuntu-26-amd64",
+    "runner": "ubuntu-24.04",
+    "image": "ubuntu:26.04",
+    "bootstrap": "scripts/install-deps-ubuntu-26.sh",
+    "binary_target": "build-ubuntu-26-binary",
+    "package_target": "package-ubuntu-26-amd64",
+    "test_preset": "ubuntu-26",
+    "package_artifact_glob": "dist/**/*.deb"
+  },
+  {
+    "id": "ubuntu-24-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "ubuntu:24.04",
+    "bootstrap": "scripts/install-deps-ubuntu-24.sh",
+    "binary_target": "build-ubuntu-24-binary",
+    "package_target": "package-ubuntu-24-arm64",
+    "test_preset": "ubuntu-24",
+    "package_artifact_glob": "dist/**/*.deb"
+  },
+  {
+    "id": "ubuntu-26-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "ubuntu:26.04",
+    "bootstrap": "scripts/install-deps-ubuntu-26.sh",
+    "binary_target": "build-ubuntu-26-binary",
+    "package_target": "package-ubuntu-26-arm64",
+    "test_preset": "ubuntu-26",
+    "package_artifact_glob": "dist/**/*.deb"
+  },
+  {
+    "id": "rpi-trixie-arm64",
+    "runner": "ubuntu-24.04-arm",
+    "image": "debian:trixie",
+    "bootstrap": "scripts/install-deps-rpi-os-trixie.sh",
+    "binary_target": "build-rpi-os-trixie-binary",
+    "package_target": "package-rpi-os-trixie-arm64",
+    "test_preset": "rpi-os-trixie",
+    "package_artifact_glob": "dist/**/*.deb"
+  }
+]

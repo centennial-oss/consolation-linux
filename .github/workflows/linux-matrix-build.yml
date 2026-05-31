@@ -1,0 +1,135 @@
+name: Linux Matrix Build
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Build binaries and run tests, or build release packages
+        type: string
+        required: true
+      release_version:
+        description: Release version for package builds; empty uses the pushed tag
+        type: string
+        default: ''
+      upload_artifacts:
+        description: Upload package artifacts from the workflow run
+        type: boolean
+        default: false
+      artifact_name_prefix:
+        description: Prefix for uploaded artifact names
+        type: string
+        default: consolation
+
+jobs:
+  load-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.load.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load build matrix
+        id: load
+        run: echo "matrix=$(jq -c '.' .github/build-matrix.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.id }}
+    needs: load-matrix
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.load-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set release version
+        if: inputs.mode == 'package'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.release_version }}" ]; then
+            echo "RELEASE_VERSION=${{ inputs.release_version }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and test binary inside distro container
+        if: inputs.mode == 'binary'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env CI=1 \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euxo pipefail
+              chmod +x "${{ matrix.bootstrap }}"
+              "${{ matrix.bootstrap }}"
+              make "${{ matrix.binary_target }}"
+              ctest --preset "${{ matrix.test_preset }}"
+            '
+
+      - name: Build package inside distro container
+        if: inputs.mode == 'package'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$PWD/dist"
+
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env CI=1 \
+            --env RELEASE_VERSION="${RELEASE_VERSION}" \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euxo pipefail
+              chmod +x "${{ matrix.bootstrap }}"
+              "${{ matrix.bootstrap }}" --with-packaging
+              make "${{ matrix.package_target }}"
+              mkdir -p dist
+              find . -maxdepth 2 -type f \
+                \( -name "*.rpm" -o -name "*.deb" \) \
+                -path "./build-*/*" \
+                -exec cp -t dist/ {} +
+            '
+
+      - name: Stage package artifacts
+        if: inputs.mode == 'package' && inputs.upload_artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "upload/${{ matrix.id }}"
+
+          shopt -s globstar nullglob
+
+          files=( ${{ matrix.package_artifact_glob }} )
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No package artifacts matched: ${{ matrix.package_artifact_glob }}"
+            find dist -type f || true
+            exit 1
+          fi
+
+          cp "${files[@]}" "upload/${{ matrix.id }}/"
+
+          echo "Package artifact(s) for ${{ matrix.id }}:"
+          ls -la "upload/${{ matrix.id }}/"
+
+      - name: Upload workflow artifacts
+        if: inputs.mode == 'package' && inputs.upload_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name_prefix }}-${{ matrix.id }}
+          path: upload/${{ matrix.id }}/*
+          if-no-files-found: error

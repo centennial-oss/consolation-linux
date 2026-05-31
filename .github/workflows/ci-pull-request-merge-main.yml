@@ -1,0 +1,16 @@
+name: CI / Pull Request & Merge to Main
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  build-binaries:
+    if: github.repository_owner == 'centennial-oss'
+    uses: ./.github/workflows/linux-matrix-build.yml
+    with:
+      mode: binary

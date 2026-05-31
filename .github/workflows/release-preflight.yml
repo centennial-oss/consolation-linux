@@ -1,0 +1,14 @@
+name: Release Preflight
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package-preflight:
+    if: github.repository_owner == 'centennial-oss' && github.ref_name == 'main'
+    uses: ./.github/workflows/linux-matrix-build.yml
+    with:
+      mode: package
+      release_version: 0.0.1
+      upload_artifacts: true
+      artifact_name_prefix: preflight

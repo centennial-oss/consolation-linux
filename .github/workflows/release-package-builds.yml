@@ -11,155 +11,11 @@ permissions:
 
 jobs:
   build-linux:
-    name: ${{ matrix.id }}
-    runs-on: ${{ matrix.runner }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Fedora amd64
-          - id: fedora-42-amd64
-            runner: ubuntu-24.04
-            image: fedora:42
-            bootstrap: scripts/install-deps-fedora-42.sh
-            target: package-fedora-42-amd64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          - id: fedora-43-amd64
-            runner: ubuntu-24.04
-            image: fedora:43
-            bootstrap: scripts/install-deps-fedora-43.sh
-            target: package-fedora-43-amd64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          - id: fedora-44-amd64
-            runner: ubuntu-24.04
-            image: fedora:44
-            bootstrap: scripts/install-deps-fedora-44.sh
-            target: package-fedora-44-amd64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          # Fedora arm64
-          - id: fedora-42-arm64
-            runner: ubuntu-24.04-arm
-            image: fedora:42
-            bootstrap: scripts/install-deps-fedora-42.sh
-            target: package-fedora-42-arm64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          - id: fedora-43-arm64
-            runner: ubuntu-24.04-arm
-            image: fedora:43
-            bootstrap: scripts/install-deps-fedora-43.sh
-            target: package-fedora-43-arm64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          - id: fedora-44-arm64
-            runner: ubuntu-24.04-arm
-            image: fedora:44
-            bootstrap: scripts/install-deps-fedora-44.sh
-            target: package-fedora-44-arm64
-            artifact_glob: "dist/**/*.{rpm,tar.gz,AppImage}"
-
-          # Ubuntu amd64
-          - id: ubuntu-24-amd64
-            runner: ubuntu-24.04
-            image: ubuntu:24.04
-            bootstrap: scripts/install-deps-ubuntu-24.sh
-            target: package-ubuntu-24-amd64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
-          - id: ubuntu-26-amd64
-            runner: ubuntu-24.04
-            image: ubuntu:26.04
-            bootstrap: scripts/install-deps-ubuntu-26.sh
-            target: package-ubuntu-26-amd64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
-          # Ubuntu arm64
-          - id: ubuntu-24-arm64
-            runner: ubuntu-24.04-arm
-            image: ubuntu:24.04
-            bootstrap: scripts/install-deps-ubuntu-24.sh
-            target: package-ubuntu-24-arm64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
-          - id: ubuntu-26-arm64
-            runner: ubuntu-24.04-arm
-            image: ubuntu:26.04
-            bootstrap: scripts/install-deps-ubuntu-26.sh
-            target: package-ubuntu-26-arm64
-            artifact_glob: "dist/**/*.{deb,tar.gz,AppImage}"
-
-          # Raspberry Pi OS (Debian-compatible)
-          - id: rpi-trixie-arm64
-            runner: ubuntu-24.04-arm
-            image: debian:trixie
-            bootstrap: scripts/install-deps-rpi-os-trixie.sh
-            target: package-rpi-os-trixie-arm64
-            artifact_glob: "dist/**/*.{deb,tar.gz}"
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set release version
-        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
-
-      - name: Build inside distro container
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "$PWD/dist"
-
-          docker run --rm \
-            --volume "$PWD:/work" \
-            --workdir /work \
-            --env CI=1 \
-            --env RELEASE_VERSION="${RELEASE_VERSION}" \
-            "${{ matrix.image }}" \
-            bash -lc '
-              set -euxo pipefail
-              chmod +x "${{ matrix.bootstrap }}"
-              "${{ matrix.bootstrap }}" --with-packaging
-              make "${{ matrix.target }}"
-              mkdir -p dist
-              find . -maxdepth 2 -type f \
-                \( -name "*.rpm" -o -name "*.deb" -o -name "*.tar.gz" -o -name "*.AppImage" \) \
-                -path "./build-*/*" \
-                -exec cp -t dist/ {} +
-            '
-
-      - name: Stage artifacts
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p upload/${{ matrix.id }}
-
-          shopt -s globstar nullglob
-
-          files=( ${{ matrix.artifact_glob }} )
-
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No artifacts matched:"
-            echo "${{ matrix.artifact_glob }}"
-            find dist -type f || true
-            exit 1
-          fi
-
-          cp "${files[@]}" upload/${{ matrix.id }}/
-
-      - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: consolation-${{ matrix.id }}
-          path: upload/${{ matrix.id }}/*
-          if-no-files-found: error
+    uses: ./.github/workflows/linux-matrix-build.yml
+    with:
+      mode: package
+      upload_artifacts: true
+      artifact_name_prefix: consolation
 
   draft-release:
     name: Create draft release
@@ -179,8 +35,8 @@ jobs:
       - name: Create draft GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          name: Consolation ${{ inputs.tag }}
+          tag_name: ${{ github.ref_name }}
+          name: Consolation ${{ github.ref_name }}
           draft: true
           prerelease: false
           files: release-artifacts/*
