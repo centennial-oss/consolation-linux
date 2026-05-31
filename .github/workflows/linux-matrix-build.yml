@@ -27,7 +27,7 @@ jobs:
       matrix: ${{ steps.load.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Load build matrix
         id: load
