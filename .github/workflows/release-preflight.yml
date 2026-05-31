@@ -3,6 +3,10 @@ name: Release Preflight
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package-preflight:
     if: github.repository_owner == 'centennial-oss' && github.ref_name == 'main'
