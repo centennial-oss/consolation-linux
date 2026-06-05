@@ -81,7 +81,7 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
     )";
 
     static constexpr char esFragmentShader[] = R"(
-        precision mediump float;
+        precision highp float;
         varying vec2 vTexCoord;
         uniform sampler2D yTex;
         uniform sampler2D uvTex;

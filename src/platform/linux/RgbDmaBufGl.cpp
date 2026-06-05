@@ -74,11 +74,7 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
     )";
 
     static constexpr char esFragmentShader[] = R"(
-        #ifdef GL_FRAGMENT_PRECISION_HIGH
         precision highp float;
-        #else
-        precision mediump float;
-        #endif
         varying vec2 vTexCoord;
         uniform sampler2D uFrame;
         uniform float uPixelWidth;
@@ -265,8 +261,8 @@ bool bindEglImageToTexture(const unsigned int textureId, void *const eglImage)
     }
 
     glBindTextureFn(GL_TEXTURE_2D, textureId);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glEGLImageTargetTexture2DOESFn(GL_TEXTURE_2D, static_cast<EGLImageKHR>(eglImage));
