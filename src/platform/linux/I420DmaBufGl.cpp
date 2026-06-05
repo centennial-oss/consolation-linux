@@ -80,13 +80,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D uTex;
         uniform sampler2D vTex;
         void main() {
-            float y = texture2D(yTex, vTexCoord).r;
+            float y = max(0.0, texture2D(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             float u = texture2D(uTex, vTexCoord).r - 0.5;
             float v = texture2D(vTex, vTexCoord).r - 0.5;
             gl_FragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";
@@ -110,13 +110,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D vTex;
         out vec4 fragColor;
         void main() {
-            float y = texture(yTex, vTexCoord).r;
+            float y = max(0.0, texture(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             float u = texture(uTex, vTexCoord).r - 0.5;
             float v = texture(vTex, vTexCoord).r - 0.5;
             fragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";
@@ -139,13 +139,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D uTex;
         uniform sampler2D vTex;
         void main() {
-            float y = texture2D(yTex, vTexCoord).r;
+            float y = max(0.0, texture2D(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             float u = texture2D(uTex, vTexCoord).r - 0.5;
             float v = texture2D(vTex, vTexCoord).r - 0.5;
             gl_FragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";

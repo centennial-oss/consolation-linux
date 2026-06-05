@@ -92,13 +92,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
             float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
             vec2 current = bytePair(texture2D(uFrame, vTexCoord));
             vec2 paired = bytePair(texture2D(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
-            float y = current.x;
+            float y = max(0.0, current.x - 0.0627451) * 1.1643836;
             float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
             float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
             gl_FragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";
@@ -130,13 +130,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
             float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
             vec2 current = bytePair(texture(uFrame, vTexCoord));
             vec2 paired = bytePair(texture(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
-            float y = current.x;
+            float y = max(0.0, current.x - 0.0627451) * 1.1643836;
             float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
             float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
             fragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";
@@ -167,13 +167,13 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
             float pairedX = (isOdd < 1.0) ? min(x + 1.0, uWidth - 1.0) : max(x - 1.0, 0.0);
             vec2 current = bytePair(texture2D(uFrame, vTexCoord));
             vec2 paired = bytePair(texture2D(uFrame, vec2((pairedX + 0.5) / uWidth, vTexCoord.y)));
-            float y = current.x;
+            float y = max(0.0, current.x - 0.0627451) * 1.1643836;
             float u = ((isOdd < 1.0) ? current.y : paired.y) - 0.5;
             float v = ((isOdd < 1.0) ? paired.y : current.y) - 0.5;
             gl_FragColor = vec4(
-                y + 1.402 * v,
-                y - 0.344 * u - 0.714 * v,
-                y + 1.772 * u,
+                y + 1.5960268 * v,
+                y - 0.3917623 * u - 0.8129680 * v,
+                y + 2.0172321 * u,
                 1.0);
         }
     )";

@@ -92,11 +92,11 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D yTex;
         uniform sampler2D uvTex;
         void main() {
-            float y = texture2D(yTex, vTexCoord).r;
+            float y = max(0.0, texture2D(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             vec2 uv = texture2D(uvTex, vTexCoord).rg - vec2(0.5, 0.5);
-            float r = y + 1.402 * uv.g;
-            float g = y - 0.344 * uv.r - 0.714 * uv.g;
-            float b = y + 1.772 * uv.r;
+            float r = y + 1.5960268 * uv.g;
+            float g = y - 0.3917623 * uv.r - 0.8129680 * uv.g;
+            float b = y + 2.0172321 * uv.r;
             gl_FragColor = vec4(r, g, b, 1.0);
         }
     )";
@@ -119,11 +119,11 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D uvTex;
         out vec4 fragColor;
         void main() {
-            float y = texture(yTex, vTexCoord).r;
+            float y = max(0.0, texture(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             vec2 uv = texture(uvTex, vTexCoord).rg - vec2(0.5, 0.5);
-            float r = y + 1.402 * uv.g;
-            float g = y - 0.344 * uv.r - 0.714 * uv.g;
-            float b = y + 1.772 * uv.r;
+            float r = y + 1.5960268 * uv.g;
+            float g = y - 0.3917623 * uv.r - 0.8129680 * uv.g;
+            float b = y + 2.0172321 * uv.r;
             fragColor = vec4(r, g, b, 1.0);
         }
     )";
@@ -145,11 +145,11 @@ std::array<ShaderSources, 3> shaderCandidates(const QOpenGLContext *context)
         uniform sampler2D yTex;
         uniform sampler2D uvTex;
         void main() {
-            float y = texture2D(yTex, vTexCoord).r;
+            float y = max(0.0, texture2D(yTex, vTexCoord).r - 0.0627451) * 1.1643836;
             vec2 uv = texture2D(uvTex, vTexCoord).rg - vec2(0.5, 0.5);
-            float r = y + 1.402 * uv.g;
-            float g = y - 0.344 * uv.r - 0.714 * uv.g;
-            float b = y + 1.772 * uv.r;
+            float r = y + 1.5960268 * uv.g;
+            float g = y - 0.3917623 * uv.r - 0.8129680 * uv.g;
+            float b = y + 2.0172321 * uv.r;
             gl_FragColor = vec4(r, g, b, 1.0);
         }
     )";
